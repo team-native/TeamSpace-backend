@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Uploaded files and runtime data
+uploads/
+*.log
+
+# Frontend dependencies and build output
+TeamSpace-frontend-main/node_modules/
+TeamSpace-frontend-main/.next/
+TeamSpace-frontend-main/out/
+TeamSpace-frontend-main/dist/
+TeamSpace-frontend-main/build/
+TeamSpace-frontend-main/coverage/
+TeamSpace-frontend-main/.env
+TeamSpace-frontend-main/.env.*
+!TeamSpace-frontend-main/.env.example
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
