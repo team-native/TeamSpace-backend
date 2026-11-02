@@ -176,6 +176,11 @@ def notify_user(
     title: str,
     href: str,
     action: bool = False,
+    *,
+    message: str | None = None,
+    meta: str | None = None,
+    notification_type: str | None = None,
+    effective_at: str | datetime | None = None,
 ) -> None:
     if user_id is None:
         return
@@ -188,24 +193,109 @@ def notify_user(
     notification_kinds = (preferences.payload.get("kinds") or {}) if preferences else {}
     if notification_kinds.get(kind, True) is False:
         return
-    valid_kinds = {"내 업무", "재정", "일정", "공지"}
+    valid_kinds = {"내 업무", "재정", "일정", "공지", "규칙 (제도 변경)"}
+    body = str(message or meta or title)
     notification = {
         "kind": kind if kind in valid_kinds else "공지",
         "sourceKind": kind,
+        "type": classify_notification_type(kind, title, href, notification_type),
         "title": title,
+        "message": body,
+        "meta": str(meta or body),
         "createdAt": iso(utc_now()),
         "href": href,
         "unread": True,
         "action": action,
     }
+    if effective_at is not None:
+        notification["effectiveAt"] = (
+            iso(effective_at) if isinstance(effective_at, datetime) else effective_at
+        )
     create_record(db, "notification", notification, db.get(User, user_id))
     preference_data = preferences.payload if preferences else {}
-    if preference_data.get("push", True) is not False and not _is_do_not_disturb(
+    if preference_data.get("push", False) is True and not _is_do_not_disturb(
         preference_data
     ):
         from app.services.push import send_push
 
         send_push(db, user_id, notification, preference_data)
+
+
+def classify_notification_type(
+    kind: str,
+    title: str,
+    href: str,
+    notification_type: str | None = None,
+) -> str:
+    aliases = {
+        "INQUIRY_ANSWERED": "INQUIRY_ANSWER",
+        "APPROVAL_REQUEST": "APPROVAL",
+        "DOCUMENT_REVISION": "RULE",
+    }
+    if notification_type:
+        value = aliases.get(notification_type.upper(), notification_type.upper())
+        if value:
+            return value
+    path = href.casefold()
+    title_text = title.casefold()
+    if "inquir" in path or "문의" in title_text:
+        return "INQUIRY_ANSWER" if "답변" in title_text else "INQUIRY"
+    if any(segment in path for segment in ("/docs", "/documents", "/rules")):
+        return "RULE"
+    if "문서가 개정" in title_text or "규칙" in title_text:
+        return "RULE"
+    if "결재" in title_text or any(
+        segment in path for segment in ("/requests/", "/approvals/")
+    ):
+        return "APPROVAL"
+    if "프로젝트 참여를 신청" in title_text or "/my/projects/" in path:
+        return "PROJECT_APPLICATION"
+    if "계정 요청" in title_text or path.endswith("/login"):
+        return "ACCOUNT"
+    if kind == "내 업무":
+        return "WORKFLOW"
+    return {
+        "재정": "FINANCE",
+        "일정": "EVENT",
+        "공지": "NOTICE",
+    }.get(kind, "GENERAL")
+
+
+def notification_response(record: Resource) -> dict[str, Any]:
+    data = dict(record.payload or {})
+    source_kind = str(data.get("sourceKind", data.get("kind", "")))
+    title = str(data.get("title", "알림"))
+    href = str(data.get("href", ""))
+    body = str(data.get("message") or data.get("meta") or data.get("body") or title)
+    legacy_type = str(data.get("type", "")).upper()
+    inferred_kind = (
+        "내 업무"
+        if legacy_type
+        in {"APPROVAL", "APPROVAL_REQUEST", "INQUIRY_ANSWER", "INQUIRY_ANSWERED"}
+        else "공지"
+    )
+    data.setdefault(
+        "kind",
+        source_kind
+        if source_kind in {"내 업무", "재정", "일정", "공지"}
+        else inferred_kind,
+    )
+    data.setdefault("sourceKind", source_kind or data["kind"])
+    data["type"] = classify_notification_type(
+        source_kind or data["kind"], title, href, str(data.get("type", "")) or None
+    )
+    data["message"] = body
+    data.setdefault("meta", body)
+    data.setdefault("title", title)
+    data.setdefault("href", href)
+    if "unread" not in data:
+        data["unread"] = not bool(data.get("isRead", False))
+    if not data.get("createdAt") and record.created_at:
+        data["createdAt"] = iso(record.created_at)
+    data.setdefault("action", False)
+    if data.get("effectiveAt") is None and data.get("effective") is not None:
+        data["effectiveAt"] = data["effective"]
+    return {"id": str(record.id), **data}
 
 
 def _is_do_not_disturb(preferences: dict[str, Any]) -> bool:

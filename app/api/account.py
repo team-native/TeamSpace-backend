@@ -14,6 +14,7 @@ from app.api.shared import (
     create_record,
     envelope,
     iso,
+    notification_response,
     update_record,
     user_profile,
 )
@@ -319,10 +320,19 @@ def get_notifications(
             or_(
                 Resource.payload["kind"].as_string() == kind,
                 Resource.payload["sourceKind"].as_string() == kind,
+                Resource.payload["type"].as_string() == kind,
             )
         )
     if unread is not None:
-        stmt = stmt.where(Resource.payload["unread"].as_boolean().is_(unread))
+        stmt = stmt.where(
+            or_(
+                Resource.payload["unread"].as_boolean().is_(unread),
+                and_(
+                    Resource.payload["unread"].as_boolean().is_(None),
+                    Resource.payload["isRead"].as_boolean().is_(not unread),
+                ),
+            )
+        )
     if cursor:
         try:
             stmt = stmt.where(Resource.id < int(cursor))
@@ -332,7 +342,7 @@ def get_notifications(
     next_cursor = str(records[limit - 1].id) if len(records) > limit else None
     return envelope(
         {
-            "items": [{"id": str(r.id), **r.payload} for r in records[:limit]],
+            "items": [notification_response(r) for r in records[:limit]],
             "nextCursor": next_cursor,
         }
     )
@@ -378,12 +388,13 @@ def get_notification_settings(
             "재정": True,
             "일정": True,
             "공지": True,
+            "규칙 (제도 변경)": True,
             "게시판": False,
         },
         "dnd": True,
         "dndFrom": "23:00",
         "dndTo": "08:00",
-        "dndDays": ["월", "화", "수", "목", "금"],
+        "dndDays": ["월", "화", "수", "목", "금", "토", "일"],
     }
     return envelope(record.payload if record else defaults)
 
@@ -403,7 +414,14 @@ def patch_notification_settings(
     current = record.payload if record else {}
     values = payload.model_dump(exclude_unset=True)
     if "kinds" in values and values["kinds"] is not None:
-        allowed_kinds = {"내 업무", "재정", "일정", "공지", "게시판"}
+        allowed_kinds = {
+            "내 업무",
+            "재정",
+            "일정",
+            "공지",
+            "규칙 (제도 변경)",
+            "게시판",
+        }
         if not set(values["kinds"]).issubset(allowed_kinds):
             raise HTTPException(422, "지원하지 않는 알림 분류가 포함되어 있습니다.")
         values["kinds"] = {**current.get("kinds", {}), **values["kinds"]}

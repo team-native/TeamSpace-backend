@@ -79,7 +79,19 @@ def _approvers(
 def _notify_approval(
     db: Session, record: Resource, user_id: int | None, title: str, action: bool = True
 ):
-    notify_user(db, user_id, "내 업무", title, f"/inhouse/requests/{record.id}", action)
+    approval_kind = record.payload.get("kind", record.payload.get("type", "결재"))
+    amount = record.payload.get("amount")
+    message = f"{approval_kind} · {amount}" if amount else str(approval_kind)
+    notify_user(
+        db,
+        user_id,
+        "내 업무",
+        title,
+        f"/inhouse/requests/{record.id}",
+        action,
+        message=message,
+        notification_type="APPROVAL",
+    )
 
 
 def _approval_files(db: Session, files: list[Any], user: User) -> list[dict[str, Any]]:

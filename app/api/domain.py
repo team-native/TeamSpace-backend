@@ -5,9 +5,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
+from app.api.shared import notification_response, notify_user
 from app.db.session import get_db
 from app.models.resource import Resource
 from app.models.user import User
+from app.services.anonymity import resolve_anonymous_owner
 
 router = APIRouter(
     tags=[
@@ -197,7 +199,7 @@ def get_notifications(
         .where(Resource.resource_type == "notification", Resource.owner_id == user.id)
         .order_by(Resource.created_at.desc())
     )
-    return ok({"list": [item(r) for r in records]})
+    return ok({"list": [notification_response(r) for r in records]})
 
 
 @router.patch("/notifications/{notification_id}/read", summary="알림 읽음 처리")
@@ -215,7 +217,7 @@ def mark_notification_read(
     )
     if record is None:
         raise HTTPException(404, "알림을 찾을 수 없습니다.")
-    record.payload = {**record.payload, "isRead": True}
+    record.payload = {**record.payload, "isRead": True, "unread": False}
     db.commit()
     return ok({"notificationId": record.id, "isRead": True}, "읽음 처리 완료")
 
@@ -642,16 +644,19 @@ def answer_inquiry(
         "answerContent": payload["answerContent"],
     }
     db.commit()
-    save(
+    recipient = (
+        db.get(User, inquiry.owner_id)
+        if inquiry.owner_id
+        else resolve_anonymous_owner(db, inquiry.payload.get("anonymousOwnerKey"))
+    )
+    notify_user(
         db,
-        "notification",
-        {
-            "type": "INQUIRY_ANSWERED",
-            "title": "문의 답변이 등록되었습니다.",
-            "inquiryId": inquiry.id,
-            "isRead": False,
-        },
-        db.get(User, inquiry.owner_id) if inquiry.owner_id else None,
+        recipient.id if recipient else None,
+        "내 업무",
+        "문의에 답변이 등록됐어요.",
+        f"/inhouse/community/inquiry?id={inquiry.id}",
+        message=f"문의 답변 · {payload['answerContent']}",
+        notification_type="INQUIRY_ANSWER",
     )
     return ok({"inquiryId": inquiry.id, "status": "ANSWERED"}, "답변이 등록되었습니다.")
 

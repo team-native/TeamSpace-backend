@@ -165,12 +165,28 @@ def require_inquiry_access(user: User, inquiry: Resource) -> None:
         raise HTTPException(403, "해당 부서 문의를 처리할 권한이 없습니다.")
 
 
-def _announce_all_users(kind: str, title: str, href: str) -> None:
+def _announce_all_users(
+    kind: str,
+    title: str,
+    href: str,
+    message: str | None = None,
+    notification_type: str | None = None,
+    effective_at: str | datetime | None = None,
+) -> None:
     with SessionLocal() as db:
         user_ids = list(db.scalars(select(User.id)))
         for user_id in user_ids:
             try:
-                notify_user(db, user_id, kind, title, href)
+                notify_user(
+                    db,
+                    user_id,
+                    kind,
+                    title,
+                    href,
+                    message=message,
+                    notification_type=notification_type,
+                    effective_at=effective_at,
+                )
             except Exception:
                 logger.exception(
                     "Could not notify user %s about an announcement", user_id
@@ -183,9 +199,21 @@ def _announce(
     title: str,
     href: str,
     enabled: bool = True,
+    *,
+    message: str | None = None,
+    notification_type: str | None = None,
+    effective_at: str | datetime | None = None,
 ) -> None:
     if enabled:
-        background_tasks.add_task(_announce_all_users, kind, title, href)
+        background_tasks.add_task(
+            _announce_all_users,
+            kind,
+            title,
+            href,
+            message,
+            notification_type,
+            effective_at,
+        )
 
 
 @router.post("/admin/projects", status_code=201, summary="프로젝트 등록")
@@ -673,22 +701,42 @@ def create_or_revise_doc(
         },
         user,
     )
+    effective_at = payload.get("effectiveAt", payload.get("effective"))
     revised = {
         **existing.payload,
         **payload,
         "version": version,
         "date": iso(datetime.now().astimezone()),
-        "effective": payload.get("effective"),
+        "effective": effective_at,
+        "effectiveAt": effective_at,
         "owner": user.name,
         "revised": True,
     }
     update_record(db, existing, revised)
     if payload.get("notify", True):
+        document_type = str(revised.get("type", "")).upper()
+        category = str(revised.get("category", ""))
+        notification_type = (
+            "RULE"
+            if document_type in {"RULE", "REGULATION"}
+            or "규정" in category
+            or "규칙" in category
+            else "DOCUMENT"
+        )
         _announce(
             background_tasks,
-            "공지",
+            "규칙 (제도 변경)"
+            if notification_type == "RULE"
+            else "공지",
             f"문서가 개정됐어요: {revised['title']}",
             f"/inhouse/documents/{slug}",
+            message=(
+                f"{revised['title']} · 시행일 {effective_at}"
+                if effective_at
+                else f"문서가 개정됐어요: {revised['title']}"
+            ),
+            notification_type=notification_type,
+            effective_at=effective_at,
         )
     return envelope(
         {"slug": slug, "version": version, "revisionId": str(revision.id)},
@@ -775,6 +823,8 @@ def answer_inquiry(
         "내 업무",
         "문의에 답변이 등록됐어요.",
         f"/inhouse/community/inquiry?id={inquiry.id}",
+        message=f"문의 답변 · {text}",
+        notification_type="INQUIRY_ANSWER",
     )
     return envelope(
         {"id": inquiry_id, "status": "답변 완료", "answer": answer},

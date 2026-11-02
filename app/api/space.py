@@ -12,6 +12,7 @@ from app.api.shared import (
     envelope,
     get_record,
     iso,
+    notification_response,
     update_record,
     user_can_finance,
     user_profile,
@@ -943,9 +944,7 @@ def dashboard_home(
             "schedule": event_preview,
         },
         "todos": open_todos[:5],
-        "notifications": [
-            {"id": str(record.id), **record.payload} for record in notifications
-        ],
+        "notifications": [notification_response(record) for record in notifications],
         "approvals": pending_approvals[:5],
         "events": [
             {"id": str(record.id), **record.payload} for record in next_events[:5]

@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def _push_allowed(config: dict, kind: str) -> bool:
-    if config.get("push", True) is False:
+    if config.get("push", False) is not True:
         return False
     kinds = config.get("kinds") or {}
     if kind in kinds and not kinds[kind]:
