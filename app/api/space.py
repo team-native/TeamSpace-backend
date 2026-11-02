@@ -20,6 +20,7 @@ from app.db.session import get_db
 from app.models.resource import Resource
 from app.models.user import User
 from app.services.anonymity import owner_filter
+from app.services.events import event_response
 from app.services.security import hash_password, verify_password
 
 router = APIRouter()
@@ -397,7 +398,13 @@ def my_summary(db: Session = Depends(get_db), user: User = Depends(get_current_u
             )
         )
     )
-    mine = [a for a in approvals if a.owner_id == user.id]
+    mine = [
+        approval
+        for approval in approvals
+        if approval.owner_id == user.id
+        and str(approval.payload.get("status", "")).strip().casefold()
+        not in {"작성 중", "draft"}
+    ]
     received = [
         a
         for a in approvals
@@ -462,18 +469,77 @@ def my_activity(
         except ValueError:
             raise HTTPException(400, "cursor 값이 올바르지 않습니다.") from None
     page = candidates[:limit]
-    items = [
+    page_post_ids = {
+        str(record.payload.get("postId"))
+        for record in page
+        if record.resource_type == "comment"
+        and str(record.payload.get("postId", "")).isdigit()
+    }
+    linked_posts = (
         {
-            "id": str(r.id),
-            "kind": r.resource_type,
-            "title": r.payload.get(
-                "title", r.payload.get("text", r.payload.get("status", "활동"))
-            ),
-            "createdAt": iso(r.created_at),
-            "href": r.payload.get("href", ""),
+            str(post.id): post
+            for post in db.scalars(
+                select(Resource).where(
+                    Resource.resource_type == "post",
+                    Resource.id.in_([int(post_id) for post_id in page_post_ids]),
+                )
+            )
         }
-        for r in page
-    ]
+        if page_post_ids
+        else {}
+    )
+    comment_counts: dict[str, int] = {}
+    reply_counts: dict[str, int] = {}
+    if page_post_ids:
+        linked_comments = db.scalars(
+            select(Resource).where(
+                Resource.resource_type == "comment",
+                Resource.payload["postId"].as_string().in_(page_post_ids),
+            )
+        )
+        for linked_comment in linked_comments:
+            post_id = str(linked_comment.payload.get("postId", ""))
+            comment_counts[post_id] = comment_counts.get(post_id, 0) + 1
+            if linked_comment.payload.get("replyTo"):
+                reply_counts[post_id] = reply_counts.get(post_id, 0) + 1
+    items = []
+    for record in page:
+        item = {
+            "id": str(record.id),
+            "kind": record.resource_type,
+            "title": record.payload.get(
+                "title",
+                record.payload.get("text", record.payload.get("status", "활동")),
+            ),
+            "createdAt": iso(record.created_at),
+            "href": record.payload.get("href", ""),
+        }
+        if record.resource_type == "comment":
+            post_id = str(record.payload.get("postId", ""))
+            post = linked_posts.get(post_id)
+            if post is not None:
+                item.update(
+                    {
+                        "postId": post_id,
+                        "postTitle": post.payload.get("title", ""),
+                        "likes": int(post.payload.get("likes", 0) or 0),
+                        "replyCount": reply_counts.get(post_id, 0),
+                        "commentCount": comment_counts.get(post_id, 0),
+                        "href": item["href"] or f"/inhouse/community/{post_id}",
+                    }
+                )
+            elif post_id:
+                item.update(
+                    {
+                        "postId": post_id,
+                        "postTitle": "",
+                        "likes": 0,
+                        "replyCount": 0,
+                        "commentCount": 0,
+                        "href": item["href"] or f"/inhouse/community/{post_id}",
+                    }
+                )
+        items.append(item)
     return envelope(
         {
             "items": items,
@@ -694,23 +760,11 @@ def get_events(
             ).casefold()
         ):
             continue
-        event = {
-            "id": str(record.id),
-            **{k: v for k, v in data.items() if k != "rsvpByUser"},
-        }
-        event["rsvp"] = bool(data.get("rsvpEnabled", data.get("rsvp", False)))
-        responses = data.get("rsvpByUser", {})
-        my_rsvp = responses.get(str(user.id))
-        event["myRsvp"] = my_rsvp.get("rsvp") if isinstance(my_rsvp, dict) else my_rsvp
-        event["rsvpCount"] = sum(
-            isinstance(response, dict) and response.get("rsvp") == "참석"
-            for response in responses.values()
-        )
-        events.append(event)
+        events.append(event_response(record.id, data, user.id))
     events.sort(
         key=lambda event: (
             event.get("date", ""),
-            event.get("time", ""),
+            event.get("start", event.get("time", "")),
             int(event["id"]),
         )
     )
@@ -731,6 +785,80 @@ def get_events(
             else None,
         }
     )
+
+
+@router.get("/events/{event_id}", summary="일정 상세")
+def get_event(
+    event_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    event = get_record(db, "event", event_id)
+    return envelope(event_response(event.id, event.payload, user.id))
+
+
+class EventReminderPatch(BaseModel):
+    oneDayBefore: bool | None = None
+    oneHourBefore: bool | None = None
+    tenMinutesBefore: bool | None = None
+
+
+def _event_reminder(db: Session, event_id: str, user: User) -> Resource | None:
+    return db.scalar(
+        select(Resource).where(
+            Resource.resource_type == "event_reminder",
+            Resource.owner_id == user.id,
+            Resource.payload["eventId"].as_string() == event_id,
+        )
+    )
+
+
+@router.get("/events/{event_id}/reminders", summary="일정 리마인더 설정 조회")
+def get_event_reminders(
+    event_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    event = get_record(db, "event", event_id)
+    record = _event_reminder(db, event_id, user)
+    values = record.payload if record else {}
+    return envelope(
+        {
+            "eventId": str(event.id),
+            "oneDayBefore": bool(values.get("oneDayBefore", False)),
+            "oneHourBefore": bool(values.get("oneHourBefore", False)),
+            "tenMinutesBefore": bool(values.get("tenMinutesBefore", False)),
+        }
+    )
+
+
+@router.patch("/events/{event_id}/reminders", summary="일정 리마인더 설정 저장")
+def patch_event_reminders(
+    event_id: str,
+    payload: EventReminderPatch,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    event = get_record(db, "event", event_id)
+    record = _event_reminder(db, event_id, user)
+    changes = payload.model_dump(exclude_unset=True)
+    values = {
+        "eventId": str(event.id),
+        "oneDayBefore": False,
+        "oneHourBefore": False,
+        "tenMinutesBefore": False,
+        **(record.payload if record else {}),
+        **changes,
+    }
+    if record:
+        record.payload = values
+    else:
+        record = Resource(
+            resource_type="event_reminder", owner_id=user.id, payload=values
+        )
+        db.add(record)
+    db.commit()
+    return envelope(values, "리마인더 설정을 저장했습니다.")
 
 
 @router.get("/dashboard/home", summary="홈 대시보드")
@@ -851,10 +979,12 @@ def rsvp(
 
     event = get_record(db, "event", event_id)
     replies = dict(event.payload.get("rsvpByUser", {}))
+    responded_at = iso(datetime.now().astimezone())
     replies[str(user.id)] = {
         "rsvp": payload.rsvp,
         "reason": payload.reason,
-        "at": iso(datetime.now().astimezone()),
+        "at": responded_at,
+        "respondedAt": responded_at,
     }
     event.payload = {**event.payload, "rsvpByUser": replies}
     db.commit()
@@ -866,12 +996,18 @@ def rsvp(
                 "eventId": event_id,
                 "title": event.payload.get("title"),
                 "rsvp": payload.rsvp,
+                "respondedAt": responded_at,
             },
         )
     )
     db.commit()
     return envelope(
-        {"eventId": event_id, "rsvp": payload.rsvp}, "참석 응답을 저장했습니다."
+        {
+            "eventId": event_id,
+            "rsvp": payload.rsvp,
+            "respondedAt": responded_at,
+        },
+        "참석 응답을 저장했습니다.",
     )
 
 

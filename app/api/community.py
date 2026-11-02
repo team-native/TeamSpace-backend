@@ -518,6 +518,7 @@ def _proposal_view(
 def get_proposals(
     category: str | None = None,
     status: str | None = None,
+    mine: bool = False,
     q: str | None = None,
     sort: str = "latest",
     cursor: str | None = None,
@@ -534,6 +535,8 @@ def get_proposals(
         "",
     )
     filters = [Resource.resource_type == "proposal"]
+    if mine:
+        filters.append(owner_filter(user))
     if category:
         filters.append(
             func.coalesce(

@@ -1,6 +1,7 @@
 import secrets
 from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,7 +18,9 @@ from app.api.shared import (
     notify_user,
     require_finance,
     update_record,
+    user_can_finance,
 )
+from app.core.config import settings
 from app.db.session import get_db
 from app.models.bank import BankSyncRun
 from app.models.resource import Resource
@@ -182,6 +185,7 @@ class ApprovalCreate(BaseModel):
     budget: dict[str, Any] = Field(default_factory=dict)
     personnel: list[dict[str, Any]] = Field(default_factory=list)
     costType: str = ""
+    templateSlug: str | None = None
 
     model_config = ConfigDict(extra="allow")
 
@@ -202,6 +206,7 @@ class ApprovalPatch(BaseModel):
     budget: dict[str, Any] | None = None
     personnel: list[dict[str, Any]] | None = None
     costType: str | None = None
+    templateSlug: str | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -224,6 +229,24 @@ def _nonnegative_money(value: Any, field: str) -> int:
     if amount < 0:
         raise HTTPException(422, f"{field} 금액은 0 이상이어야 합니다.")
     return amount
+
+
+def _validate_template_link(db: Session, template_slug: str, kind: str) -> str:
+    slug = template_slug.strip()
+    if not slug:
+        raise HTTPException(422, "templateSlug를 입력해주세요.")
+    template = db.scalar(
+        select(Resource).where(
+            Resource.resource_type == "doc",
+            Resource.payload["slug"].as_string() == slug,
+        )
+    )
+    if template is None or str(template.payload.get("type", "")).upper() != "TEMPLATE":
+        raise HTTPException(422, "선택한 결재 양식 템플릿을 찾을 수 없습니다.")
+    linked_types = template.payload.get("approvalTypes", [])
+    if linked_types and kind not in linked_types:
+        raise HTTPException(422, "해당 템플릿에 연결되지 않은 결재 종류입니다.")
+    return slug
 
 
 @router.post("/approvals", status_code=201, summary="결재 작성 또는 임시 저장")
@@ -257,6 +280,11 @@ def create_approval(
     kind = kind_aliases.get(payload.kind)
     if kind is None:
         raise HTTPException(422, "지원하지 않는 결재 문서 유형입니다.")
+    template_slug = (
+        _validate_template_link(db, payload.templateSlug, kind)
+        if payload.templateSlug
+        else None
+    )
     draft = payload.status in {"작성 중", "draft", "DRAFT"}
     if not draft and not payload.title.strip():
         raise HTTPException(422, "결재 제목을 입력해주세요.")
@@ -331,6 +359,7 @@ def create_approval(
             "approverIds": [u.id for u in approvers],
             "staff": payload.staff,
             "period": payload.period,
+            "templateSlug": template_slug,
         },
         user,
     )
@@ -355,6 +384,10 @@ def patch_approval(
     }:
         raise HTTPException(403, "작성 중이거나 반려된 본인 결재만 수정할 수 있습니다.")
     changes = payload.model_dump(exclude_unset=True)
+    if changes.get("templateSlug"):
+        changes["templateSlug"] = _validate_template_link(
+            db, changes["templateSlug"], str(record.payload.get("kind", ""))
+        )
     requested_status = changes.get("status")
     if requested_status not in {None, "작성 중", "결재 대기"}:
         raise HTTPException(
@@ -567,11 +600,24 @@ def add_approval_comment(
     return envelope(comment, "댓글을 등록했습니다.", 201)
 
 
+@router.get("/finance/public-summary", summary="공개 재무 요약")
 @router.get("/finance/summary", summary="재무 요약")
 def finance_summary(
-    db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    month: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    require_finance(user)
+    current_date = datetime.now(ZoneInfo(settings.app_timezone)).date()
+    if month:
+        try:
+            selected_month = date.fromisoformat(f"{month}-01").strftime("%Y-%m")
+        except ValueError:
+            raise HTTPException(400, "month는 YYYY-MM 형식이어야 합니다.") from None
+        if selected_month != month:
+            raise HTTPException(400, "month는 YYYY-MM 형식이어야 합니다.")
+    else:
+        selected_month = current_date.strftime("%Y-%m")
+    can_view_details = user_can_finance(user)
     receipts = list(
         db.scalars(select(Resource).where(Resource.resource_type == "finance_receipt"))
     )
@@ -583,23 +629,22 @@ def finance_summary(
             select(Resource).where(Resource.resource_type == "finance_bank_expense")
         )
     )
-    current_month = date.today().strftime("%Y-%m")
     collected = [r for r in receipts if r.payload.get("status") == "입금 완료"]
     month_income = sum(
         int(r.payload.get("amount", 0))
         for r in collected
-        if str(r.payload.get("date", "")).startswith(current_month)
+        if str(r.payload.get("date", "")).startswith(selected_month)
     )
     month_expense = sum(
         int(a.payload.get("amountValue", 0) or 0)
         for a in approvals
         if a.payload.get("status") == "승인"
-        and str(a.payload.get("useDate", "")).startswith(current_month)
+        and str(a.payload.get("useDate", "")).startswith(selected_month)
     )
     month_expense += sum(
         int(e.payload.get("amount", 0) or 0)
         for e in bank_expenses
-        if str(e.payload.get("date", "")).startswith(current_month)
+        if str(e.payload.get("date", "")).startswith(selected_month)
     )
     settings_row = db.scalar(
         select(Resource).where(Resource.resource_type == "finance_settings")
@@ -671,33 +716,55 @@ def finance_summary(
         .order_by(BankSyncRun.id.desc())
         .limit(1)
     )
-    return envelope(
-        {
-            "period": date.today().strftime("%Y년 %m월"),
-            "demo": False,
-            "lastSyncedAt": last_synced.isoformat() if last_synced else None,
-            "summary": {
-                "available": available,
-                "monthlyRevenue": month_income,
-                "monthlyExpense": month_expense,
-                "externalReceipts": sum(
-                    int(r.payload.get("amount", 0)) for r in receipts
-                ),
-                "reserveBalance": reserve,
-            },
-            "pools": pools,
-            "flow": flow,
-            "receipts": [
-                {
-                    k: r.payload.get(k)
-                    for k in ("client", "project", "amount", "status", "date")
-                }
-                for r in receipts[:10]
-            ],
-            "notices": finance.get("notices", []),
-            "member": {"email": user.email, "name": user.name},
-        }
-    )
+    result = {
+        "period": f"{selected_month[:4]}년 {selected_month[5:]}월",
+        "month": selected_month,
+        "demo": False,
+        "lastSyncedAt": last_synced.isoformat() if last_synced else None,
+        "summary": {
+            "available": available,
+            "monthlyRevenue": month_income,
+            "monthlyExpense": month_expense,
+            "externalReceipts": sum(int(r.payload.get("amount", 0)) for r in receipts),
+            "reserveBalance": reserve,
+        },
+        "pools": pools,
+        "flow": flow,
+    }
+    if can_view_details:
+        result.update(
+            {
+                "receipts": [
+                    {
+                        k: r.payload.get(k)
+                        for k in ("client", "project", "amount", "status", "date")
+                    }
+                    for r in receipts[:10]
+                ],
+                "notices": finance.get("notices", []),
+                "member": {"email": user.email, "name": user.name},
+            }
+        )
+    else:
+        result["pools"] = [
+            {
+                key: pool.get(key)
+                for key in ("id", "label", "amount", "ratio", "color")
+                if key in pool
+            }
+            for pool in pools
+            if isinstance(pool, dict)
+        ]
+        result["flow"] = [
+            {
+                key: month_data.get(key)
+                for key in ("month", "income", "expense")
+                if key in month_data
+            }
+            for month_data in flow
+            if isinstance(month_data, dict)
+        ]
+    return envelope(result)
 
 
 @router.get("/finance/receipts", summary="수금 내역")

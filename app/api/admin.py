@@ -39,6 +39,7 @@ from app.services.anonymity import (
     resolve_anonymous_owner,
 )
 from app.services.email import send_email
+from app.services.events import normalize_event_payload
 from app.services.notice_schedule import _parse_publish_at, is_notice_visible
 
 router = APIRouter()
@@ -541,11 +542,24 @@ def create_event(
     user: User = Depends(get_current_user),
 ):
     require_admin(user)
-    if not payload.get("date") or not payload.get("title"):
-        raise HTTPException(400, "일정 날짜와 제목을 입력해주세요.")
-    record = create_record(db, "event", {**payload, "rsvpByUser": {}}, user)
+    if not str(payload.get("title", "")).strip():
+        raise HTTPException(400, "일정 제목을 입력해주세요.")
+    data = normalize_event_payload(payload)
+    data["title"] = str(data["title"]).strip()
+    data["history"] = [
+        {
+            "action": "created",
+            "who": user.name,
+            "at": iso(datetime.now().astimezone()),
+        }
+    ]
+    data["rsvpByUser"] = {}
+    record = create_record(db, "event", data, user)
     _announce(
-        background_tasks, "일정", f"새 일정: {payload['title']}", "/inhouse/my/calendar"
+        background_tasks,
+        "일정",
+        f"새 일정: {data['title']}",
+        "/inhouse/my/calendar",
     )
     return envelope({"id": str(record.id)}, "일정을 등록했습니다.", 201)
 
@@ -561,8 +575,35 @@ def patch_event(
     require_admin(user)
     event = get_record(db, "event", event_id)
     previous = dict(event.payload)
-    updated = update_record(db, event, {**event.payload, **payload})
-    if any(previous.get(key) != updated.payload.get(key) for key in payload):
+    changes = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"history", "rsvpByUser", "id", "createdAt", "updatedAt"}
+    }
+    normalized = normalize_event_payload(changes, previous)
+    if "title" in changes:
+        normalized["title"] = str(normalized.get("title", "")).strip()
+        if not normalized["title"]:
+            raise HTTPException(422, "일정 제목을 입력해주세요.")
+    changed_fields = {
+        key: {"before": previous.get(key), "after": normalized.get(key)}
+        for key in changes
+        if previous.get(key) != normalized.get(key)
+    }
+    if changed_fields:
+        existing_history = previous.get("history", [])
+        history = list(existing_history) if isinstance(existing_history, list) else []
+        history.append(
+            {
+                "action": "updated",
+                "who": user.name,
+                "at": iso(datetime.now().astimezone()),
+                "changes": changed_fields,
+            }
+        )
+        normalized["history"] = history
+    updated = update_record(db, event, normalized)
+    if changed_fields:
         _announce(
             background_tasks,
             "일정",

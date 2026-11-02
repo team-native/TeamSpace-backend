@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
@@ -6,16 +7,59 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
 from app.api.shared import (
+    APPROVAL_FORM_TYPES,
     create_record,
     envelope,
     iso,
     user_can_finance,
 )
+from app.core.config import settings
 from app.db.session import get_db
 from app.models.resource import Resource
 from app.models.user import User
 
 router = APIRouter()
+
+
+def _month_window() -> tuple[datetime, datetime]:
+    now = datetime.now(ZoneInfo(settings.app_timezone))
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def _template_usage_counts(db: Session, slugs: list[str]) -> dict[str, int]:
+    if not slugs:
+        return {}
+    start, end = _month_window()
+    rows = db.execute(
+        select(
+            Resource.payload["templateSlug"].as_string(),
+            func.count(Resource.id),
+        )
+        .where(
+            Resource.resource_type == "approval",
+            Resource.payload["templateSlug"].as_string().in_(slugs),
+            Resource.created_at >= start,
+            Resource.created_at < end,
+        )
+        .group_by(Resource.payload["templateSlug"].as_string())
+    )
+    return {str(slug): int(count) for slug, count in rows if slug is not None}
+
+
+def _doc_read_status(db: Session, user: User, slug: str) -> tuple[bool, str | None]:
+    receipt = db.scalar(
+        select(Resource).where(
+            Resource.resource_type == "doc_read",
+            Resource.owner_id == user.id,
+            Resource.payload["slug"].as_string() == slug,
+        )
+    )
+    return (True, receipt.payload.get("readAt")) if receipt else (False, None)
 
 
 def _require_doc_access(data: dict, user: User) -> None:
@@ -76,27 +120,54 @@ def get_docs(
             raise HTTPException(400, "cursor 값이 올바르지 않습니다.") from None
     records = list(db.scalars(stmt.order_by(Resource.id.desc()).limit(limit + 1)))
     page = records[:limit]
+    slugs = [str(record.payload.get("slug", "")) for record in page]
+    reads = (
+        {
+            str(record.payload.get("slug")): record.payload.get("readAt")
+            for record in db.scalars(
+                select(Resource).where(
+                    Resource.resource_type == "doc_read",
+                    Resource.owner_id == user.id,
+                    Resource.payload["slug"].as_string().in_(slugs),
+                )
+            )
+        }
+        if slugs
+        else {}
+    )
+    template_slugs = [
+        str(record.payload.get("slug", ""))
+        for record in page
+        if str(record.payload.get("type", "")).upper() == "TEMPLATE"
+    ]
+    template_usage = _template_usage_counts(db, template_slugs)
     docs = []
     for record in page:
         data = record.payload
-        docs.append(
-            {
-                k: data.get(k)
-                for k in (
-                    "slug",
-                    "category",
-                    "type",
-                    "title",
-                    "copy",
-                    "date",
-                    "version",
-                    "effective",
-                    "owner",
-                    "revised",
-                )
-                if k in data
-            }
-        )
+        slug = str(data.get("slug", ""))
+        item = {
+            key: data.get(key)
+            for key in (
+                "slug",
+                "category",
+                "type",
+                "title",
+                "copy",
+                "date",
+                "version",
+                "effective",
+                "owner",
+                "revised",
+            )
+            if key in data
+        }
+        item["read"] = slug in reads
+        item["readAt"] = reads.get(slug)
+        if str(data.get("type", "")).upper() == "TEMPLATE":
+            item["approvalTypes"] = data.get("approvalTypes", [])
+            item["availableApprovalTypes"] = list(APPROVAL_FORM_TYPES)
+            item["usageThisMonth"] = template_usage.get(slug, 0)
+        docs.append(item)
     return envelope(
         {
             "items": docs,
@@ -127,8 +198,12 @@ def get_doc(
         data = history.payload.get("document", data)
     _require_doc_access(data, user)
     result = {**data}
-    if data.get("type") == "TEMPLATE":
+    result["read"], result["readAt"] = _doc_read_status(db, user, slug)
+    if str(data.get("type", "")).upper() == "TEMPLATE":
         result.setdefault("fields", data.get("fields", []))
+        result.setdefault("approvalTypes", [])
+        result["availableApprovalTypes"] = list(APPROVAL_FORM_TYPES)
+        result["usageThisMonth"] = _template_usage_counts(db, [slug]).get(slug, 0)
         if data.get("fileId"):
             result["downloadUrl"] = f"/uploads/{data['fileId']}"
     return envelope(result)
@@ -198,12 +273,15 @@ def read_doc(
         )
     )
     if receipt is None:
+        read_at = iso(datetime.now().astimezone())
         create_record(
             db,
             "doc_read",
-            {"slug": slug, "readAt": iso(datetime.now().astimezone())},
+            {"slug": slug, "readAt": read_at},
             user,
         )
+    else:
+        read_at = receipt.payload.get("readAt")
     from sqlalchemy import func
 
     total = (
@@ -217,4 +295,4 @@ def read_doc(
         )
         or 0
     )
-    return envelope({"slug": slug, "read": True, "confirmed": total})
+    return envelope({"slug": slug, "read": True, "readAt": read_at, "confirmed": total})

@@ -674,7 +674,15 @@ def get_rules(
             in (r.payload.get("title", "") + r.payload.get("content", "")).lower()
         )
     ]
-    return ok({"list": values, "totalCount": len(values)})
+    categories = sorted(
+        {
+            str(record.payload.get("category", "")).strip()
+            for record in records
+            if str(record.payload.get("category", "")).strip()
+        },
+        key=str.casefold,
+    )
+    return ok({"list": values, "totalCount": len(values), "categories": categories})
 
 
 @router.get("/rules/{rule_id}", summary="규정 상세 및 개정 이력 조회")

@@ -10,6 +10,14 @@ from app.core.config import settings
 from app.models.resource import Resource
 from app.models.user import User
 
+APPROVAL_FORM_TYPES = (
+    "비용 승인",
+    "인력 지원",
+    "프로젝트 요청",
+    "운영 요청",
+    "기타 내부 문서",
+)
+
 
 def envelope(data: Any, message: str = "조회 성공", code: int = 200) -> dict[str, Any]:
     # The in-house frontend consumes the typed payload directly (e.g. {items, nextCursor}).
