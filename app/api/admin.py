@@ -1,8 +1,8 @@
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -14,6 +14,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -38,6 +39,7 @@ from app.services.anonymity import (
     resolve_anonymous_owner,
 )
 from app.services.email import send_email
+from app.services.notice_schedule import _parse_publish_at, is_notice_visible
 
 router = APIRouter()
 UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads"
@@ -121,7 +123,9 @@ def _can_download_upload(db: Session, upload: Resource, user: User) -> bool:
                 and str(data.get("category", "")).upper() != "FINANCE"
             ) or user_can_finance(user):
                 return True
-        elif record.resource_type in {"notice", "event"}:
+        elif record.resource_type == "notice":
+            return is_notice_visible(data)
+        elif record.resource_type == "event":
             return True
         elif record.resource_type == "inquiry":
             if (
@@ -138,6 +142,19 @@ def _can_download_upload(db: Session, upload: Resource, user: User) -> bool:
 def require_admin(user: User) -> None:
     if "Admin" not in (user.roles or []):
         raise HTTPException(403, "관리자 권한이 필요합니다.")
+
+
+def require_notice_writer(user: User) -> None:
+    if not set(user.roles or []).intersection({"Admin", "FA", "Leader"}):
+        raise HTTPException(403, "공지 작성 권한이 필요합니다.")
+
+
+def _notice_author_role(user: User) -> str:
+    roles = user.roles or []
+    return next(
+        (role for role in ("Admin", "FA", "Leader") if role in roles),
+        roles[0] if roles else "Member",
+    )
 
 
 def require_inquiry_access(user: User, inquiry: Resource) -> None:
@@ -160,9 +177,14 @@ def _announce_all_users(kind: str, title: str, href: str) -> None:
 
 
 def _announce(
-    background_tasks: BackgroundTasks, kind: str, title: str, href: str
+    background_tasks: BackgroundTasks,
+    kind: str,
+    title: str,
+    href: str,
+    enabled: bool = True,
 ) -> None:
-    background_tasks.add_task(_announce_all_users, kind, title, href)
+    if enabled:
+        background_tasks.add_task(_announce_all_users, kind, title, href)
 
 
 @router.post("/admin/projects", status_code=201, summary="프로젝트 등록")
@@ -291,34 +313,119 @@ def download_file(
     )
 
 
+class NoticeCreate(BaseModel):
+    kind: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=200)
+    body: str = ""
+    status: Literal["PUBLISHED", "SCHEDULED", "DRAFT"] = "PUBLISHED"
+    publishAt: datetime | None = None
+    sendPush: bool = True
+    attachments: list[Any] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="allow")
+
+
+def _notice_attachments(db: Session, values: list[Any], user: User) -> list[dict]:
+    attachments = []
+    seen_ids = set()
+    for value in values:
+        if isinstance(value, dict):
+            upload_id = value.get("id", value.get("uploadId", value.get("fileId")))
+            if upload_id is None:
+                upload_id = value.get("url", "")
+        else:
+            upload_id = value
+        upload_id = str(upload_id or "").split("/uploads/")[-1].split("?")[0]
+        if not upload_id.isdigit():
+            raise HTTPException(422, "공지 첨부 파일 ID가 올바르지 않습니다.")
+        upload = get_record(db, "upload", upload_id)
+        if not is_record_owner(upload, user):
+            raise HTTPException(
+                403, "본인이 업로드한 파일만 공지에 첨부할 수 있습니다."
+            )
+        if upload.id in seen_ids:
+            continue
+        if int(upload.payload.get("size", 0)) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "파일은 10MB 이하만 첨부할 수 있습니다.")
+        attachments.append(
+            {
+                "id": str(upload.id),
+                "url": f"/uploads/{upload.id}",
+                "filename": upload.payload.get("filename", "file"),
+                "size": int(upload.payload.get("size", 0)),
+                "contentType": upload.payload.get("contentType", ""),
+            }
+        )
+        seen_ids.add(upload.id)
+    return attachments
+
+
 @router.post("/admin/notices", status_code=201, summary="공지 작성")
 def create_notice(
-    payload: dict[str, Any],
+    payload: NoticeCreate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    require_admin(user)
-    for field in ("kind", "title", "body"):
-        if not payload.get(field):
-            raise HTTPException(400, f"{field} 항목은 필수입니다.")
+    require_notice_writer(user)
+    if not payload.kind.strip() or not payload.title.strip():
+        raise HTTPException(400, "공지 종류와 제목은 필수입니다.")
+    if payload.status != "DRAFT" and not payload.body.strip():
+        raise HTTPException(400, "공개 공지 내용은 필수입니다.")
+    publish_at = payload.publishAt
+    if payload.status == "SCHEDULED" and publish_at is None:
+        raise HTTPException(422, "예약 공지는 publishAt을 입력해야 합니다.")
+    if publish_at is not None:
+        if publish_at.tzinfo is None or publish_at.utcoffset() is None:
+            raise HTTPException(
+                422, "publishAt에는 시간대가 포함된 ISO8601 시각이 필요합니다."
+            )
+        publish_at = publish_at.astimezone(timezone.utc)
+    data = payload.model_dump()
+    data["kind"] = payload.kind.strip()
+    data["title"] = payload.title.strip()
+    data["body"] = payload.body
+    data["publishAt"] = publish_at.isoformat() if publish_at else None
+    data["attachments"] = _notice_attachments(db, payload.attachments, user)
+    for server_field in (
+        "id",
+        "audience",
+        "author",
+        "authorRole",
+        "createdAt",
+        "updatedAt",
+        "publishedAt",
+        "confirmed",
+        "confirmedAt",
+        "confirmedByMe",
+        "total",
+        "views",
+        "announcementSent",
+    ):
+        data.pop(server_field, None)
+    if payload.status == "PUBLISHED":
+        data["publishedAt"] = iso(datetime.now(timezone.utc))
     data = {
-        **payload,
+        **data,
         "createdAt": iso(datetime.now().astimezone()),
         "author": user.name,
-        "pinned": bool(payload.get("pinned", False)),
-        "mustRead": bool(payload.get("mustRead", False)),
+        "authorRole": _notice_author_role(user),
+        "pinned": bool(data.get("pinned", False)),
+        "mustRead": bool(data.get("mustRead", False)),
         "confirmed": 0,
         "total": db.query(User).count(),
     }
     record = create_record(db, "notice", data, user)
-    _announce(
-        background_tasks,
-        "공지",
-        f"새 공지: {payload['title']}",
-        f"/inhouse/community/notices/{record.id}",
+    if payload.status == "PUBLISHED" and payload.sendPush:
+        _announce(
+            background_tasks,
+            "공지",
+            f"새 공지: {payload.title}",
+            f"/inhouse/community/notices/{record.id}",
+        )
+    return envelope(
+        {"id": str(record.id), **record.payload}, "공지를 등록했습니다.", 201
     )
-    return envelope({"id": str(record.id)}, "공지를 등록했습니다.", 201)
 
 
 @router.patch("/admin/notices/{notice_id}", summary="공지 수정 및 고정")
@@ -329,19 +436,74 @@ def patch_notice(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    require_admin(user)
+    require_notice_writer(user)
     notice = get_record(db, "notice", notice_id)
+    if "sendPush" in payload and not isinstance(payload["sendPush"], bool):
+        raise HTTPException(422, "sendPush는 true 또는 false여야 합니다.")
+    if "status" in payload and payload["status"] not in {
+        "PUBLISHED",
+        "SCHEDULED",
+        "DRAFT",
+    }:
+        raise HTTPException(422, "공지 상태가 올바르지 않습니다.")
+    changes = {
+        key: value
+        for key, value in payload.items()
+        if key
+        not in {
+            "id",
+            "audience",
+            "author",
+            "authorRole",
+            "createdAt",
+            "updatedAt",
+            "publishedAt",
+            "confirmed",
+            "confirmedAt",
+            "confirmedByMe",
+            "total",
+            "views",
+            "announcementSent",
+        }
+    }
+    if "attachments" in changes:
+        if not isinstance(changes["attachments"], list):
+            raise HTTPException(422, "attachments는 파일 ID 목록이어야 합니다.")
+        changes["attachments"] = _notice_attachments(db, changes["attachments"], user)
+    merged = {**notice.payload, **changes}
+    merged.pop("audience", None)
+    if merged.get("status", "PUBLISHED") == "SCHEDULED":
+        publish_at = _parse_publish_at(merged.get("publishAt"))
+        if publish_at is None:
+            raise HTTPException(
+                422, "예약 공지는 시간대가 포함된 publishAt이 필요합니다."
+            )
+        merged["publishAt"] = publish_at.isoformat()
+    if (
+        merged.get("status", "PUBLISHED") != "DRAFT"
+        and not str(merged.get("body", "")).strip()
+    ):
+        raise HTTPException(422, "공개 공지 내용은 필수입니다.")
+    if (
+        merged.get("status", "PUBLISHED") == "PUBLISHED"
+        and notice.payload.get("status") != "PUBLISHED"
+    ):
+        merged["publishedAt"] = iso(datetime.now(timezone.utc))
     updated = update_record(
         db,
         notice,
-        {**notice.payload, **payload, "updatedAt": iso(datetime.now().astimezone())},
+        {**merged, "updatedAt": iso(datetime.now().astimezone())},
     )
-    if any(key in payload for key in ("title", "body", "pinned", "mustRead")):
+    if any(key in changes for key in ("title", "body", "pinned", "mustRead", "status")):
         _announce(
             background_tasks,
             "공지",
             f"공지 업데이트: {updated.payload.get('title', '')}",
             f"/inhouse/community/notices/{notice_id}",
+            enabled=(
+                updated.payload.get("status", "PUBLISHED") == "PUBLISHED"
+                and updated.payload.get("sendPush", True) is not False
+            ),
         )
     return envelope({"id": notice_id, **updated.payload}, "공지를 수정했습니다.")
 

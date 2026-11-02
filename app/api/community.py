@@ -27,6 +27,7 @@ from app.services.anonymity import (
     public_content_payload,
     resolve_anonymous_owner,
 )
+from app.services.notice_schedule import is_notice_visible
 
 router = APIRouter()
 REPORT_REASONS = {"욕설·비하", "개인정보 노출", "도배·광고", "사실과 다른 내용", "기타"}
@@ -1210,6 +1211,13 @@ def get_notices(
         filters.append(
             func.coalesce(Resource.payload["mustRead"].as_boolean(), False) == must_read
         )
+    status_expr = func.coalesce(Resource.payload["status"].as_string(), "PUBLISHED")
+    scheduled_visible = and_(
+        status_expr == "SCHEDULED",
+        Resource.payload["publishAt"].as_string()
+        <= datetime.now(timezone.utc).isoformat(),
+    )
+    filters.append(or_(status_expr == "PUBLISHED", scheduled_visible))
     if q:
         pattern = f"%{q.strip()}%"
         filters.append(
@@ -1304,7 +1312,7 @@ def get_notices(
         items.append(
             {
                 "id": str(record.id),
-                **data,
+                **{key: value for key, value in data.items() if key != "audience"},
                 "confirmed": count,
                 "total": int(data.get("total", 0)) or count,
                 "confirmedByMe": str(record.id) in confirmed_by_me,
@@ -1327,16 +1335,15 @@ def get_notice(
     user: User = Depends(get_current_user),
 ):
     notice = get_record(db, "notice", notice_id)
+    if not is_notice_visible(notice.payload):
+        raise HTTPException(404, "공지를 찾을 수 없습니다.")
     data = notice.payload
-    confirmed = (
-        db.scalar(
-            select(Resource).where(
-                Resource.resource_type == "notice_confirmation",
-                Resource.owner_id == user.id,
-                Resource.payload["noticeId"].as_string() == notice_id,
-            )
+    confirmation = db.scalar(
+        select(Resource).where(
+            Resource.resource_type == "notice_confirmation",
+            Resource.owner_id == user.id,
+            Resource.payload["noticeId"].as_string() == notice_id,
         )
-        is not None
     )
     total = (
         db.scalar(
@@ -1349,13 +1356,51 @@ def get_notice(
         )
         or 0
     )
+    try:
+        views = max(0, int(data.get("views", 0) or 0)) + 1
+    except (TypeError, ValueError):
+        views = 1
+    notice.payload = {**data, "views": views}
+    db.commit()
+    author = db.get(User, notice.owner_id) if notice.owner_id else None
+    author_roles = author.roles or [] if author else []
+    author_role = next(
+        (role for role in ("Admin", "FA", "Leader") if role in author_roles),
+        author_roles[0] if author_roles else "Member",
+    )
+    linked_documents = data.get(
+        "linkedDocuments",
+        data.get(
+            "linkedDocs",
+            data.get(
+                "linkedDocument",
+                data.get(
+                    "relatedDocuments",
+                    data.get(
+                        "relatedDocs",
+                        data.get("relatedDocument", data.get("document", [])),
+                    ),
+                ),
+            ),
+        ),
+    )
+    if linked_documents and not isinstance(linked_documents, list):
+        linked_documents = [linked_documents]
     return envelope(
         {
             "id": notice_id,
-            **data,
+            **{
+                key: value for key, value in notice.payload.items() if key != "audience"
+            },
             "confirmed": total,
             "total": int(data.get("total", 0)) or total,
-            "confirmedByMe": confirmed,
+            "confirmedByMe": confirmation is not None,
+            "confirmedAt": confirmation.payload.get("confirmedAt")
+            if confirmation
+            else None,
+            "views": views,
+            "authorRole": data.get("authorRole", author_role),
+            "linkedDocuments": linked_documents,
         }
     )
 
@@ -1366,7 +1411,9 @@ def confirm_notice(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    get_record(db, "notice", notice_id)
+    notice = get_record(db, "notice", notice_id)
+    if not is_notice_visible(notice.payload):
+        raise HTTPException(404, "공지를 찾을 수 없습니다.")
     exists = db.scalar(
         select(Resource).where(
             Resource.resource_type == "notice_confirmation",

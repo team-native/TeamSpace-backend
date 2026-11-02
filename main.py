@@ -1,5 +1,6 @@
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,7 @@ from app.models.bank import BankImport, BankSyncRun  # noqa: F401
 from app.models.resource import Resource  # noqa: F401
 from app.models.user import User  # noqa: F401
 from app.services.anonymity import anonymize_legacy_content
+from app.services.notice_schedule import publish_due_notices, scheduled_notice_worker
 
 
 @asynccontextmanager
@@ -18,7 +20,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         anonymize_legacy_content(db)
-    yield
+    await asyncio.to_thread(publish_due_notices)
+    notice_worker = asyncio.create_task(scheduled_notice_worker())
+    try:
+        yield
+    finally:
+        notice_worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await notice_worker
 
 
 app = FastAPI(
