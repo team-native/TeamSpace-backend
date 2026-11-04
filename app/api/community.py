@@ -84,6 +84,15 @@ def _post_view(
     if not result["anonymous"]:
         result["author"] = author_name or (author.name if author else "알 수 없음")
     if detail:
+        liked_comment_ids = set(
+            db.scalars(
+                select(Resource.payload["commentId"].as_string()).where(
+                    Resource.resource_type == "comment_like",
+                    Resource.owner_id == viewer.id,
+                    Resource.payload["postId"].as_string() == str(record.id),
+                )
+            )
+        )
         comment_owner_ids = {
             comment.owner_id
             for comment in comments
@@ -107,6 +116,7 @@ def _post_view(
                 bool(data.get("anonymous")),
                 author_name=comment_author_names.get(comment.owner_id),
                 author_preloaded=True,
+                liked=str(comment.id) in liked_comment_ids,
             )
             for comment in comments
         ]
@@ -120,6 +130,7 @@ def _comment_view(
     post_anonymous: bool = False,
     author_name: str | None = None,
     author_preloaded: bool = False,
+    liked: bool = False,
 ) -> dict[str, Any]:
     data = record.payload
     author = (
@@ -135,6 +146,7 @@ def _comment_view(
         "createdAt": iso(record.created_at),
         "when": iso(record.created_at),
         "likes": int(data.get("likes", 0)),
+        "liked": liked,
         "replyTo": data.get("replyTo"),
     }
     if post_anonymous and data.get("isPostAuthor"):
