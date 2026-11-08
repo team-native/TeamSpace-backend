@@ -84,6 +84,14 @@ def _post_view(
     if not result["anonymous"]:
         result["author"] = author_name or (author.name if author else "알 수 없음")
     if detail:
+        post_reaction = db.scalar(
+            select(Resource.id).where(
+                Resource.resource_type == "post_like",
+                Resource.owner_id == viewer.id,
+                Resource.payload["postId"].as_string() == str(record.id),
+            )
+        )
+        result["liked"] = post_reaction is not None
         liked_comment_ids = set(
             db.scalars(
                 select(Resource.payload["commentId"].as_string()).where(
@@ -108,6 +116,29 @@ def _post_view(
             if comment_owner_ids
             else {}
         )
+        anonymous_author_numbers: dict[str, int] = {}
+        for comment in comments:
+            comment_data = comment.payload
+            if not comment_data.get("anonymous") or comment_data.get("isPostAuthor"):
+                continue
+            owner_key = str(comment_data.get("anonymousOwnerKey", f"comment:{comment.id}"))
+            anonymous_author_numbers.setdefault(owner_key, len(anonymous_author_numbers) + 1)
+        anonymous_labels_by_comment_id = {}
+        for comment in comments:
+            comment_data = comment.payload
+            owner_key = str(
+                comment_data.get("anonymousOwnerKey", f"comment:{comment.id}")
+            )
+            is_labeled_anonymous = (
+                comment_data.get("anonymous")
+                and not comment_data.get("isPostAuthor")
+                and anonymous
+            )
+            anonymous_labels_by_comment_id[str(comment.id)] = (
+                f"익명 {anonymous_author_numbers[owner_key]}"
+                if is_labeled_anonymous
+                else None
+            )
         result["comments"] = [
             _comment_view(
                 comment,
@@ -117,6 +148,9 @@ def _post_view(
                 author_name=comment_author_names.get(comment.owner_id),
                 author_preloaded=True,
                 liked=str(comment.id) in liked_comment_ids,
+                anonymous_author_label=anonymous_labels_by_comment_id[
+                    str(comment.id)
+                ],
             )
             for comment in comments
         ]
@@ -131,6 +165,7 @@ def _comment_view(
     author_name: str | None = None,
     author_preloaded: bool = False,
     liked: bool = False,
+    anonymous_author_label: str | None = None,
 ) -> dict[str, Any]:
     data = record.payload
     author = (
@@ -151,6 +186,8 @@ def _comment_view(
     }
     if post_anonymous and data.get("isPostAuthor"):
         result["author"] = "글쓴이"
+    elif post_anonymous and data.get("anonymous"):
+        result["author"] = anonymous_author_label or "익명"
     elif not data.get("anonymous"):
         result["author"] = author_name or (author.name if author else "알 수 없음")
     result["mine"] = is_record_owner(record, viewer)
@@ -474,6 +511,7 @@ def _proposal_view(
         "mine": is_record_owner(proposal, user),
         "answer": data.get("answer"),
         "history": data.get("history", []),
+        "views": int(data.get("views", 0) or 0),
     }
     if not anonymous:
         result["author"] = author_name or (
@@ -481,6 +519,14 @@ def _proposal_view(
         )
         result["dept"] = author.department if author else data.get("dept", "")
     if detail:
+        reaction = db.scalar(
+            select(Resource.id).where(
+                Resource.resource_type == "proposal_recommend",
+                Resource.owner_id == user.id,
+                Resource.payload["proposalId"].as_string() == str(proposal.id),
+            )
+        )
+        result["recommended"] = reaction is not None
         comment_owner_ids = {
             comment.owner_id
             for comment in comments
@@ -655,9 +701,14 @@ def get_proposal(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return envelope(
-        _proposal_view(get_record(db, "proposal", proposal_id), db, user, True)
-    )
+    proposal = get_record(db, "proposal", proposal_id)
+    try:
+        views = max(0, int(proposal.payload.get("views", 0) or 0)) + 1
+    except (TypeError, ValueError):
+        views = 1
+    proposal.payload = {**proposal.payload, "views": views}
+    db.commit()
+    return envelope(_proposal_view(proposal, db, user, True))
 
 
 @router.post("/proposals", status_code=201, summary="운영 제안 작성")

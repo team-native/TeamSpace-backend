@@ -37,6 +37,7 @@ class ProfilePatch(BaseModel):
     cohort: str | None = None
     github: str | None = None
     photo: str | None = None
+    avatarBackground: str | None = Field(default=None, max_length=40)
     bio: str | None = Field(default=None, max_length=60)
     interests: list[str] | None = None
 

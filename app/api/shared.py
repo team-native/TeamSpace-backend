@@ -148,6 +148,7 @@ def user_profile(
         "cohort": data.get("cohort", ""),
         "github": data.get("github", ""),
         "photo": data.get("photo", ""),
+        "avatarBackground": data.get("avatarBackground", ""),
         "joined": iso(joined_at),
         "bio": data.get("bio", ""),
         "interests": data.get("interests", []),
