@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import Numeric, cast, func, or_, select
+from sqlalchemy import cast, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
@@ -799,20 +799,29 @@ def get_receipts(
                 ) from None
     if from_date and to_date and from_date > to_date:
         raise HTTPException(400, "from은 to보다 늦을 수 없습니다.")
-    base_filters = [Resource.resource_type == "finance_receipt"]
-    if from_date:
-        base_filters.append(Resource.payload["date"].as_string() >= from_date)
-    if to_date:
-        base_filters.append(Resource.payload["date"].as_string() <= to_date)
-    amount = cast(Resource.payload["amount"].as_string(), Numeric(20, 0))
-    summary_rows = db.execute(
-        select(Resource.payload["status"].as_string(), func.sum(amount))
-        .where(*base_filters)
-        .group_by(Resource.payload["status"].as_string())
+    records = list(
+        db.scalars(
+            select(Resource)
+            .where(Resource.resource_type == "finance_receipt")
+            .order_by(Resource.id.desc())
+        )
     )
+    filtered_records = []
     totals = {"totalOrder": 0, "paid": 0, "pending": 0, "overdue": 0}
-    for status, amount_total in summary_rows:
-        amount_total = int(amount_total or 0)
+    invalid_amount_count = 0
+    for record in records:
+        receipt_date = str(record.payload.get("date", ""))
+        if from_date and receipt_date < from_date:
+            continue
+        if to_date and receipt_date > to_date:
+            continue
+        filtered_records.append(record)
+        try:
+            amount_total = parse_money(record.payload.get("amount"))
+        except ValueError:
+            invalid_amount_count += 1
+            continue
+        status = record.payload.get("status")
         totals["totalOrder"] += amount_total
         if status == "입금 완료":
             totals["paid"] += amount_total
@@ -821,18 +830,29 @@ def get_receipts(
         elif status == "연체":
             totals["overdue"] += amount_total
 
-    stmt = select(Resource).where(*base_filters)
     if cursor:
         try:
-            stmt = stmt.where(Resource.id < int(cursor))
+            cursor_id = int(cursor)
         except ValueError:
             raise HTTPException(400, "cursor 값이 올바르지 않습니다.") from None
-    records = list(db.scalars(stmt.order_by(Resource.id.desc()).limit(limit + 1)))
-    page = records[:limit]
+        filtered_records = [r for r in filtered_records if r.id < cursor_id]
+    page = filtered_records[:limit]
+    items = []
+    for record in page:
+        payload = dict(record.payload)
+        try:
+            payload["amount"] = parse_money(payload.get("amount"))
+        except ValueError:
+            payload["amount"] = None
+            payload["amountInvalid"] = True
+        items.append({"id": str(record.id), **payload})
+    totals["invalidAmountCount"] = invalid_amount_count
     return envelope(
         {
-            "items": [{"id": str(record.id), **record.payload} for record in page],
-            "nextCursor": str(page[-1].id) if len(records) > limit and page else None,
+            "items": items,
+            "nextCursor": str(page[-1].id)
+            if len(filtered_records) > limit and page
+            else None,
             "totals": totals,
         }
     )

@@ -162,7 +162,8 @@ def user_profile(
 
 
 def user_can_finance(user: User) -> bool:
-    return bool(set(user.roles or []).intersection({"Admin", "FA", "Leader"}))
+    role_names = {str(role).strip().casefold() for role in user.roles or []}
+    return bool(role_names.intersection({"admin", "fa", "leader"}))
 
 
 def require_finance(user: User) -> None:
