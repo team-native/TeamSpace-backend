@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
 from app.api.shared import (
@@ -24,6 +24,10 @@ from app.db.session import get_db
 from app.models.resource import Resource
 from app.models.user import User
 from app.services.email import EmailConfigurationError, EmailDeliveryError, send_email
+from app.services.organization import (
+    find_directory_member,
+    load_organization,
+)
 from app.services.security import hash_password
 
 router = APIRouter()
@@ -124,34 +128,44 @@ def get_people(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    profile = aliased(Resource)
-    profile_dept = func.coalesce(
-        profile.payload["dept"].as_string(), User.department, ""
-    )
-    stmt = select(User, profile).outerjoin(
-        profile,
-        and_(profile.resource_type == "profile", profile.owner_id == User.id),
-    )
+    people = _people_items(db)
     if dept:
-        stmt = stmt.where(profile_dept == dept)
+        people = [person for person in people if person.get("dept") == dept]
     if q:
-        pattern = f"%{q.strip()}%"
-        stmt = stmt.where(
-            or_(
-                User.name.ilike(pattern),
-                User.email.ilike(pattern),
-                profile_dept.ilike(pattern),
-                profile.payload["major"].as_string().ilike(pattern),
-                profile.payload["bio"].as_string().ilike(pattern),
+        query = q.strip().casefold()
+        people = [
+            person
+            for person in people
+            if any(
+                query in str(person.get(field) or "").casefold()
+                for field in ("name", "email", "dept", "role", "bio")
             )
-        )
+        ]
     if cursor:
-        try:
-            stmt = stmt.where(User.id > int(cursor))
-        except ValueError:
-            raise HTTPException(400, "cursor 값이 올바르지 않습니다.") from None
-    rows = list(db.execute(stmt.order_by(User.id).limit(limit + 1)).all())
-    page = rows[:limit]
+        cursor_index = next(
+            (index for index, person in enumerate(people) if person["id"] == cursor),
+            None,
+        )
+        if cursor_index is None:
+            raise HTTPException(400, "cursor 값이 올바르지 않습니다.")
+        people = people[cursor_index + 1 :]
+    page = people[:limit]
+    next_cursor = page[-1]["id"] if len(people) > limit and page else None
+    return envelope({"items": page, "nextCursor": next_cursor})
+
+
+def _people_items(db: Session) -> list[dict[str, Any]]:
+    directory = load_organization().get("members", [])
+    users = list(db.scalars(select(User).order_by(User.id)))
+    users_by_name: dict[str, list[User]] = {}
+    for person in users:
+        users_by_name.setdefault(person.name, []).append(person)
+    profiles = {
+        profile.owner_id: profile.payload
+        for profile in db.scalars(
+            select(Resource).where(Resource.resource_type == "profile")
+        )
+    }
     projects_by_user: dict[str, list[list[str]]] = {}
     for project in db.scalars(
         select(Resource).where(Resource.resource_type == "project")
@@ -160,27 +174,74 @@ def get_people(
             projects_by_user.setdefault(str(member_id), []).append(
                 [project.payload.get("name", ""), project.payload.get("role", "Member")]
             )
-    items = [
-        user_profile(
-            db,
-            person,
-            profile.payload if profile else {},
-            projects_by_user,
+
+    items = []
+    linked_user_ids = set()
+    for member in directory:
+        matches = users_by_name.get(member.get("name", ""), [])
+        person = matches[0] if len(matches) == 1 else None
+        if person is None:
+            projects = [
+                [entry.get("project", ""), entry.get("role", "Member")]
+                for entry in member.get("projects", [])
+            ]
+            items.append(
+                {
+                    "id": member["id"],
+                    "name": member.get("name", ""),
+                    "email": "",
+                    "dept": member.get("primaryDepartment", ""),
+                    "role": member.get("role", ""),
+                    "major": member.get("role", ""),
+                    "cohort": "",
+                    "github": "",
+                    "photo": "",
+                    "avatarBackground": "",
+                    "joined": "",
+                    "bio": "",
+                    "interests": [],
+                    "projects": projects,
+                    "isNew": bool(member.get("isNew", False)),
+                    "lead": bool(member.get("isLead", False)),
+                    "roles": ["Member"],
+                    "active": True,
+                }
+            )
+            continue
+        linked_user_ids.add(person.id)
+        item = user_profile(db, person, profiles.get(person.id, {}), projects_by_user)
+        item["id"] = member["id"]
+        item["dept"] = profiles.get(person.id, {}).get(
+            "dept", person.department or member.get("primaryDepartment", "")
         )
-        for person, profile in page
-    ]
-    return envelope(
-        {
-            "items": items,
-            "nextCursor": str(page[-1][0].id) if len(rows) > limit and page else None,
-        }
-    )
+        item["role"] = item.get("role") or member.get("role", "")
+        if not item.get("projects"):
+            item["projects"] = [
+                [entry.get("project", ""), entry.get("role", "Member")]
+                for entry in member.get("projects", [])
+            ]
+        items.append(item)
+
+    for person in users:
+        if person.id not in linked_user_ids:
+            item = user_profile(
+                db, person, profiles.get(person.id, {}), projects_by_user
+            )
+            items.append(item)
+    return items
 
 
 @router.get("/people/{person_id}", summary="팀원 상세")
 def get_person(
     person_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_user)
 ):
+    member = find_directory_member(person_id)
+    if member:
+        item = next(
+            (item for item in _people_items(db) if item["id"] == person_id), None
+        )
+        if item:
+            return envelope(item)
     try:
         person = db.get(User, int(person_id))
     except ValueError:

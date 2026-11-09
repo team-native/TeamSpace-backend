@@ -5,6 +5,7 @@ CREATE TABLE users (
     department VARCHAR(100),
     password_hash VARCHAR(255) NOT NULL,
     roles JSON NOT NULL DEFAULT '[]'::json,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

@@ -16,7 +16,11 @@ router = APIRouter(tags=["auth"])
 @router.post("/auth/login", summary="사용자 로그인 및 토큰 발급")
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> dict:
     user = db.scalar(select(User).where(User.email == payload.email))
-    if user is None or not verify_password(payload.password, user.password_hash):
+    if (
+        user is None
+        or not user.active
+        or not verify_password(payload.password, user.password_hash)
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="이메일 또는 비밀번호가 일치하지 않습니다.",
@@ -48,7 +52,7 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> dict:
             status_code=401, detail="refresh token이 유효하지 않거나 만료되었습니다."
         ) from None
     user = db.get(User, user_id)
-    if user is None:
+    if user is None or not user.active:
         raise HTTPException(status_code=401, detail="사용자를 찾을 수 없습니다.")
     access_token, refresh_token = create_token_pair(user.id)
     return {"accessToken": access_token, "refreshToken": refresh_token}

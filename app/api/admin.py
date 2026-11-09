@@ -43,6 +43,7 @@ from app.services.anonymity import (
 from app.services.email import send_email
 from app.services.events import normalize_event_payload
 from app.services.notice_schedule import _parse_publish_at, is_notice_visible
+from app.services.organization import get_public_user_id, get_user_by_public_id
 from app.services.security import hash_password
 
 router = APIRouter()
@@ -57,14 +58,19 @@ class SignupRejectRequest(BaseModel):
 
 
 class UserRolesPatch(BaseModel):
-    roles: list[str] = Field(min_length=1, max_length=5)
+    roles: list[str] = Field(min_length=1, max_length=1)
+
+
+class AdminUserPatch(BaseModel):
+    active: bool | None = None
+    dept: str | None = Field(default=None, max_length=100)
 
 
 class AdminUserCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     email: EmailStr
     dept: str | None = Field(default=None, max_length=100)
-    roles: list[str] = Field(min_length=1, max_length=5)
+    roles: list[str] = Field(min_length=1, max_length=1)
 
 
 def _send_signup_approved_email(email: str, name: str) -> None:
@@ -170,6 +176,15 @@ def _validated_roles(roles: list[str]) -> list[str]:
         raise HTTPException(
             422, "역할은 Admin, Leader, FA, Member, PM 중에서 선택해주세요."
         )
+    return normalized
+
+
+def _validated_single_role(roles: list[str]) -> list[str]:
+    normalized = _validated_roles(roles)
+    if len(normalized) != 1:
+        raise HTTPException(422, "역할은 한 개만 지정해주세요.")
+    if normalized[0] == "FA":
+        raise HTTPException(422, "FA 권한은 재정 권한 API에서 설정해주세요.")
     return normalized
 
 
@@ -1087,19 +1102,23 @@ def change_finance_permission(
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(404, "사용자를 찾을 수 없습니다.")
-    roles = set(target.roles or [])
+    roles = list(target.roles or [])
     if payload.get("canViewFinance"):
-        if not roles.intersection({"FA", "Leader", "Admin"}):
-            roles.add("FA")
+        if not set(roles).intersection({"Leader", "Admin"}):
+            roles = ["FA"]
     else:
-        roles.discard("FA")
-    target.roles = sorted(roles)
+        roles = [role for role in roles if role != "FA"]
+        if not roles:
+            roles = ["Member"]
+        else:
+            roles = roles[:1]
+    target.roles = roles
     db.commit()
     return envelope(
         {
             "id": str(target.id),
             "roles": target.roles,
-            "canViewFinance": bool(roles.intersection({"FA", "Leader", "Admin"})),
+            "canViewFinance": bool(set(roles).intersection({"FA", "Leader", "Admin"})),
         },
         "재정 권한을 갱신했습니다.",
     )
@@ -1212,16 +1231,16 @@ def reject_signup(
 
 @router.patch("/admin/users/{user_id}/roles", summary="사용자 역할 변경")
 def patch_user_roles(
-    user_id: int,
+    user_id: str,
     payload: UserRolesPatch,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     require_admin(user)
-    target = db.get(User, user_id)
+    target = get_user_by_public_id(db, user_id)
     if target is None:
         raise HTTPException(404, "사용자를 찾을 수 없습니다.")
-    roles = _validated_roles(payload.roles)
+    roles = _validated_single_role(payload.roles)
     existing_admins = [
         candidate
         for candidate in db.scalars(select(User))
@@ -1234,7 +1253,47 @@ def patch_user_roles(
         raise HTTPException(409, "마지막 관리자 역할은 해제할 수 없습니다.")
     target.roles = roles
     db.commit()
-    return envelope({"id": str(target.id), "roles": target.roles})
+    return envelope({"id": user_id, "roles": target.roles})
+
+
+@router.patch("/admin/users/{user_id}", summary="사용자 상태 및 부서 수정")
+def patch_admin_user(
+    user_id: str,
+    payload: AdminUserPatch,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    require_admin(user)
+    target = get_user_by_public_id(db, user_id)
+    if target is None:
+        raise HTTPException(404, "사용자를 찾을 수 없습니다.")
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(422, "active 또는 dept 값을 입력해주세요.")
+    if "dept" in changes:
+        dept = changes["dept"]
+        if dept is not None and not dept.strip():
+            raise HTTPException(422, "부서명은 비워둘 수 없습니다.")
+        target.department = dept.strip() if dept else None
+        profile = db.scalar(
+            select(Resource).where(
+                Resource.resource_type == "profile", Resource.owner_id == target.id
+            )
+        )
+        if profile:
+            profile.payload = {**profile.payload, "dept": target.department or ""}
+    if "active" in changes:
+        if changes["active"] is None:
+            raise HTTPException(422, "active는 true 또는 false여야 합니다.")
+        target.active = changes["active"]
+    db.commit()
+    return envelope(
+        {
+            "id": user_id,
+            "active": target.active,
+            "dept": target.department or "",
+        }
+    )
 
 
 @router.post("/admin/users", status_code=201, summary="관리자 사용자 추가")
@@ -1247,7 +1306,7 @@ def create_admin_user(
     email = str(payload.email).strip().casefold()
     if db.scalar(select(User.id).where(func.lower(User.email) == email)):
         raise HTTPException(409, "이미 등록된 이메일입니다.")
-    roles = _validated_roles(payload.roles)
+    roles = _validated_single_role(payload.roles)
     temporary_password = secrets.token_urlsafe(18)
     member = User(
         email=email,
@@ -1261,7 +1320,7 @@ def create_admin_user(
     db.refresh(member)
     return envelope(
         {
-            "id": str(member.id),
+            "id": get_public_user_id(db, member),
             "name": member.name,
             "email": member.email,
             "dept": member.department,
@@ -1275,16 +1334,16 @@ def create_admin_user(
 
 @router.delete("/admin/users/{user_id}", summary="관리자 사용자 삭제")
 def delete_admin_user(
-    user_id: int,
+    user_id: str,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     require_admin(user)
-    if user_id == user.id:
-        raise HTTPException(409, "현재 로그인한 관리자 계정은 삭제할 수 없습니다.")
-    target = db.get(User, user_id)
+    target = get_user_by_public_id(db, user_id)
     if target is None:
         raise HTTPException(404, "사용자를 찾을 수 없습니다.")
+    if target.id == user.id:
+        raise HTTPException(409, "현재 로그인한 관리자 계정은 삭제할 수 없습니다.")
     target_is_admin = "admin" in {
         str(role).strip().casefold() for role in target.roles or []
     }
@@ -1313,4 +1372,4 @@ def delete_admin_user(
             record.owner_id = None
     db.delete(target)
     db.commit()
-    return envelope({"id": str(user_id), "deleted": True})
+    return envelope({"id": user_id, "deleted": True})

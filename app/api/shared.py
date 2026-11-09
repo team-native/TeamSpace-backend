@@ -158,6 +158,7 @@ def user_profile(
             set(user.roles or []).intersection({"Leader", "Admin", "Lead", "부서 리드"})
         ),
         "roles": user.roles or [],
+        "active": user.active,
     }
 
 
