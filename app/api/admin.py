@@ -1,4 +1,5 @@
 import logging
+import secrets
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any, Literal
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Body,
     Depends,
     File,
     HTTPException,
@@ -14,7 +16,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -41,11 +43,28 @@ from app.services.anonymity import (
 from app.services.email import send_email
 from app.services.events import normalize_event_payload
 from app.services.notice_schedule import _parse_publish_at, is_notice_visible
+from app.services.security import hash_password
 
 router = APIRouter()
 UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+ASSIGNABLE_ROLES = {"Admin", "Leader", "FA", "Member", "PM"}
 logger = logging.getLogger(__name__)
+
+
+class SignupRejectRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class UserRolesPatch(BaseModel):
+    roles: list[str] = Field(min_length=1, max_length=5)
+
+
+class AdminUserCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    email: EmailStr
+    dept: str | None = Field(default=None, max_length=100)
+    roles: list[str] = Field(min_length=1, max_length=5)
 
 
 def _send_signup_approved_email(email: str, name: str) -> None:
@@ -141,8 +160,17 @@ def _can_download_upload(db: Session, upload: Resource, user: User) -> bool:
 
 
 def require_admin(user: User) -> None:
-    if "Admin" not in (user.roles or []):
+    if "admin" not in {str(role).strip().casefold() for role in user.roles or []}:
         raise HTTPException(403, "관리자 권한이 필요합니다.")
+
+
+def _validated_roles(roles: list[str]) -> list[str]:
+    normalized = list(dict.fromkeys(str(role).strip() for role in roles))
+    if not normalized or any(role not in ASSIGNABLE_ROLES for role in normalized):
+        raise HTTPException(
+            422, "역할은 Admin, Leader, FA, Member, PM 중에서 선택해주세요."
+        )
+    return normalized
 
 
 def require_notice_writer(user: User) -> None:
@@ -725,9 +753,7 @@ def create_or_revise_doc(
         )
         _announce(
             background_tasks,
-            "규칙 (제도 변경)"
-            if notification_type == "RULE"
-            else "공지",
+            "규칙 (제도 변경)" if notification_type == "RULE" else "공지",
             f"문서가 개정됐어요: {revised['title']}",
             f"/inhouse/documents/{slug}",
             message=(
@@ -1104,23 +1130,23 @@ def signup_requests(
 @router.post("/admin/signup-requests/{request_id}/approve", summary="가입 요청 승인")
 def approve_signup(
     request_id: str,
-    payload: dict[str, str],
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    payload: dict[str, str] | None = Body(default=None),
 ):
     require_admin(user)
     request = get_record(db, "signup_request", request_id)
+    if request.payload.get("status") != "PENDING":
+        raise HTTPException(409, "대기 중인 가입 요청만 승인할 수 있습니다.")
     email = request.payload.get("email", "")
     if db.scalar(select(User.id).where(User.email == email)):
         raise HTTPException(409, "이메일이 이미 등록되었습니다.")
     password_hash = request.payload.get("passwordHash")
-    temporary_password = payload.get("temporaryPassword", "")
+    temporary_password = (payload or {}).get("temporaryPassword", "")
     if temporary_password:
         if len(temporary_password) < 8:
             raise HTTPException(400, "초기 비밀번호는 8자 이상이어야 합니다.")
-        from app.services.security import hash_password
-
         password_hash = hash_password(temporary_password)
     if not password_hash:
         raise HTTPException(
@@ -1154,3 +1180,137 @@ def approve_signup(
     return envelope(
         {"userId": str(member.id), "status": "APPROVED"}, "가입 요청을 승인했습니다."
     )
+
+
+@router.post("/admin/signup-requests/{request_id}/reject", summary="가입 요청 반려")
+def reject_signup(
+    request_id: str,
+    payload: SignupRejectRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    require_admin(user)
+    reason = payload.reason.strip()
+    if not reason:
+        raise HTTPException(422, "반려 사유를 입력해주세요.")
+    request = get_record(db, "signup_request", request_id)
+    if request.payload.get("status") != "PENDING":
+        raise HTTPException(409, "대기 중인 가입 요청만 반려할 수 있습니다.")
+    data = {
+        **request.payload,
+        "status": "REJECTED",
+        "rejectionReason": reason,
+        "rejectedBy": user.name,
+        "rejectedAt": iso(datetime.now(timezone.utc)),
+    }
+    data.pop("passwordHash", None)
+    update_record(db, request, data)
+    return envelope(
+        {"id": request_id, "status": "REJECTED"}, "가입 요청을 반려했습니다."
+    )
+
+
+@router.patch("/admin/users/{user_id}/roles", summary="사용자 역할 변경")
+def patch_user_roles(
+    user_id: int,
+    payload: UserRolesPatch,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    require_admin(user)
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(404, "사용자를 찾을 수 없습니다.")
+    roles = _validated_roles(payload.roles)
+    existing_admins = [
+        candidate
+        for candidate in db.scalars(select(User))
+        if "admin" in {str(role).strip().casefold() for role in candidate.roles or []}
+    ]
+    target_is_admin = "admin" in {
+        str(role).strip().casefold() for role in target.roles or []
+    }
+    if target_is_admin and "Admin" not in roles and len(existing_admins) <= 1:
+        raise HTTPException(409, "마지막 관리자 역할은 해제할 수 없습니다.")
+    target.roles = roles
+    db.commit()
+    return envelope({"id": str(target.id), "roles": target.roles})
+
+
+@router.post("/admin/users", status_code=201, summary="관리자 사용자 추가")
+def create_admin_user(
+    payload: AdminUserCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    require_admin(user)
+    email = str(payload.email).strip().casefold()
+    if db.scalar(select(User.id).where(func.lower(User.email) == email)):
+        raise HTTPException(409, "이미 등록된 이메일입니다.")
+    roles = _validated_roles(payload.roles)
+    temporary_password = secrets.token_urlsafe(18)
+    member = User(
+        email=email,
+        name=payload.name.strip(),
+        department=payload.dept,
+        password_hash=hash_password(temporary_password),
+        roles=roles,
+    )
+    db.add(member)
+    db.commit()
+    db.refresh(member)
+    return envelope(
+        {
+            "id": str(member.id),
+            "name": member.name,
+            "email": member.email,
+            "dept": member.department,
+            "roles": member.roles,
+            "temporaryPassword": temporary_password,
+        },
+        "사용자를 추가했습니다. 임시 비밀번호는 이번 응답에서만 확인할 수 있습니다.",
+        201,
+    )
+
+
+@router.delete("/admin/users/{user_id}", summary="관리자 사용자 삭제")
+def delete_admin_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    require_admin(user)
+    if user_id == user.id:
+        raise HTTPException(409, "현재 로그인한 관리자 계정은 삭제할 수 없습니다.")
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(404, "사용자를 찾을 수 없습니다.")
+    target_is_admin = "admin" in {
+        str(role).strip().casefold() for role in target.roles or []
+    }
+    if target_is_admin:
+        admin_count = sum(
+            1
+            for candidate in db.scalars(select(User))
+            if "admin"
+            in {str(role).strip().casefold() for role in candidate.roles or []}
+        )
+        if admin_count <= 1:
+            raise HTTPException(409, "마지막 관리자 계정은 삭제할 수 없습니다.")
+    private_resource_types = {
+        "profile",
+        "notification",
+        "notification_settings",
+        "password_reset",
+        "push_token",
+        "push_subscription",
+        "event_reminder",
+    }
+    for record in db.scalars(select(Resource).where(Resource.owner_id == target.id)):
+        if record.resource_type in private_resource_types:
+            db.delete(record)
+        else:
+            record.owner_id = None
+    db.delete(target)
+    db.commit()
+    return envelope({"id": str(user_id), "deleted": True})

@@ -15,6 +15,7 @@ from app.api.shared import (
     envelope,
     iso,
     notification_response,
+    notify_user,
     update_record,
     user_profile,
 )
@@ -212,6 +213,18 @@ def signup_request(payload: SignupRequest, db: Session = Depends(get_db)):
         createdAt=iso(datetime.now(timezone.utc)),
     )
     record = create_record(db, "signup_request", data)
+    for admin in db.scalars(select(User).order_by(User.id)):
+        if "admin" in {str(role).strip().casefold() for role in admin.roles or []}:
+            notify_user(
+                db,
+                admin.id,
+                "내 업무",
+                "새 가입 요청이 접수됐습니다.",
+                "/inhouse/admin/signups",
+                action=True,
+                message=f"{payload.name} · {payload.email}",
+                notification_type="SIGNUP_REQUEST",
+            )
     return envelope(
         {"id": str(record.id), "status": "PENDING"}, "가입 요청을 접수했습니다.", 202
     )
