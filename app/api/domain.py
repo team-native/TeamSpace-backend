@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -160,6 +162,16 @@ def organization_tree(
             ]
         }
     )
+
+
+@router.get("/organization", summary="조직 및 팀원 화면 데이터")
+def get_organization(
+    _: User = Depends(get_current_user),
+):
+    data_path = Path(__file__).resolve().parents[1] / "data" / "organization.json"
+    with data_path.open(encoding="utf-8") as organization_file:
+        organization = json.load(organization_file)
+    return organization
 
 
 @router.get("/dashboard/home", summary="대시보드 조회")

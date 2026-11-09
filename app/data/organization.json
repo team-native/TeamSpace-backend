@@ -1,0 +1,688 @@
+{
+  "meta": {
+    "title": "Native 9·10기",
+    "totalMembers": 24,
+    "teamCount": 2,
+    "organizationCounts": {
+      "all": 24,
+      "Native": 19,
+      "NativeLab": 5
+    }
+  },
+  "organizationChart": {
+    "founder": {
+      "memberId": "member-01",
+      "name": "김준표",
+      "avatarInitial": "준",
+      "title": "Leader · Founder"
+    },
+    "groups": [
+      {
+        "id": "native-ops",
+        "name": "NativeOps",
+        "description": "운영 조직",
+        "memberCount": 4,
+        "lead": { "memberId": "member-03", "name": "안율", "avatarInitial": "율", "role": "Operator Lead" },
+        "members": [
+          { "memberId": "member-03", "name": "안율", "avatarInitial": "율", "role": "Operator Lead", "isLead": true },
+          { "memberId": "member-02", "name": "이시우", "avatarInitial": "시", "role": "Lead", "isLead": true },
+          { "memberId": "member-04", "name": "양지우", "avatarInitial": "지", "role": "Study Lead", "isLead": true },
+          { "memberId": "member-15", "name": "조현", "avatarInitial": "현", "role": "IT", "isLead": false }
+        ]
+      },
+      {
+        "id": "pmo",
+        "name": "PMO",
+        "description": "PM / PO",
+        "memberCount": 5,
+        "lead": { "memberId": "member-02", "name": "이시우", "avatarInitial": "시", "role": "PM (GYMUP) · PO (Hopes)" },
+        "members": [
+          { "memberId": "member-02", "name": "이시우", "avatarInitial": "시", "role": "PM (GYMUP) · PO (Hopes)", "isLead": true },
+          { "memberId": "member-07", "name": "옥물결", "avatarInitial": "물", "role": "PM (MOSS)", "isLead": false },
+          { "memberId": "member-14", "name": "정인성", "avatarInitial": "인", "role": "PM (Axyne)", "isLead": false },
+          { "memberId": "member-05", "name": "김민준", "avatarInitial": "민", "role": "PM (TeamSpace)", "isLead": false },
+          { "memberId": "member-06", "name": "박지성", "avatarInitial": "지", "role": "PO (Moil)", "isLead": false }
+        ]
+      },
+      {
+        "id": "fa",
+        "name": "FA",
+        "description": "Finance & Accounting",
+        "memberCount": 1,
+        "lead": { "memberId": "member-05", "name": "김민준", "avatarInitial": "민", "role": "재무 담당" },
+        "members": [
+          { "memberId": "member-05", "name": "김민준", "avatarInitial": "민", "role": "FA · 재무 담당", "isLead": true }
+        ]
+      },
+      {
+        "id": "ios",
+        "name": "iOS",
+        "description": "iOS Engineering",
+        "memberCount": 7,
+        "lead": { "memberId": "member-02", "name": "이시우", "avatarInitial": "시", "role": "iOS 전공 리더" },
+        "members": [
+          { "memberId": "member-02", "name": "이시우", "avatarInitial": "시", "role": "iOS", "isLead": true },
+          { "memberId": "member-01", "name": "김준표", "avatarInitial": "준", "role": "iOS", "isLead": false },
+          { "memberId": "member-03", "name": "안율", "avatarInitial": "율", "role": "iOS", "isLead": false },
+          { "memberId": "member-05", "name": "김민준", "avatarInitial": "민", "role": "iOS", "isLead": false },
+          { "memberId": "member-07", "name": "옥물결", "avatarInitial": "물", "role": "iOS", "isLead": false },
+          { "memberId": "member-18", "name": "김민선", "avatarInitial": "민", "role": "iOS", "isLead": false },
+          { "memberId": "member-19", "name": "이예은", "avatarInitial": "예", "role": "iOS", "isLead": false }
+        ]
+      },
+      {
+        "id": "android-flutter",
+        "name": "Android · Flutter",
+        "description": "Cross & Android Client",
+        "memberCount": 2,
+        "lead": { "memberId": "member-06", "name": "박지성", "avatarInitial": "지", "role": "Android" },
+        "members": [
+          { "memberId": "member-06", "name": "박지성", "avatarInitial": "지", "role": "Android", "isLead": true },
+          { "memberId": "member-08", "name": "이수찬", "avatarInitial": "수", "role": "Flutter", "isLead": false }
+        ]
+      },
+      {
+        "id": "frontend",
+        "name": "Frontend",
+        "description": "Web Frontend",
+        "memberCount": 8,
+        "lead": { "memberId": "member-04", "name": "양지우", "avatarInitial": "지", "role": "Frontend 전공 리더" },
+        "members": [
+          { "memberId": "member-04", "name": "양지우", "avatarInitial": "지", "role": "Frontend", "isLead": true },
+          { "memberId": "member-09", "name": "김은율", "avatarInitial": "은", "role": "Frontend", "isLead": false },
+          { "memberId": "member-10", "name": "김주영", "avatarInitial": "주", "role": "Frontend", "isLead": false },
+          { "memberId": "member-11", "name": "이은지", "avatarInitial": "은", "role": "Frontend", "isLead": false },
+          { "memberId": "member-12", "name": "한승희", "avatarInitial": "승", "role": "Frontend", "isLead": false },
+          { "memberId": "member-20", "name": "신예빈", "avatarInitial": "예", "role": "Frontend", "isLead": false },
+          { "memberId": "member-21", "name": "김도연", "avatarInitial": "도", "role": "Frontend", "isLead": false },
+          { "memberId": "member-23", "name": "전혜린", "avatarInitial": "혜", "role": "Frontend", "isLead": false }
+        ]
+      },
+      {
+        "id": "backend",
+        "name": "Backend",
+        "description": "Server Engineering",
+        "memberCount": 4,
+        "lead": { "memberId": "member-14", "name": "정인성", "avatarInitial": "인", "role": "Backend 전공 리더" },
+        "members": [
+          { "memberId": "member-14", "name": "정인성", "avatarInitial": "인", "role": "Backend", "isLead": true },
+          { "memberId": "member-13", "name": "전태양", "avatarInitial": "태", "role": "Backend", "isLead": false },
+          { "memberId": "member-15", "name": "조현", "avatarInitial": "현", "role": "Backend", "isLead": false },
+          { "memberId": "member-24", "name": "임규범", "avatarInitial": "규", "role": "Backend", "isLead": false }
+        ]
+      },
+      {
+        "id": "devops",
+        "name": "DevOps",
+        "description": "Infrastructure",
+        "memberCount": 2,
+        "lead": { "memberId": "member-16", "name": "이채율", "avatarInitial": "채", "role": "DevOps 전공 리더" },
+        "members": [
+          { "memberId": "member-16", "name": "이채율", "avatarInitial": "채", "role": "DevOps", "isLead": true },
+          { "memberId": "member-17", "name": "김민규", "avatarInitial": "민", "role": "DevOps", "isLead": false }
+        ]
+      },
+      {
+        "id": "design",
+        "name": "Design",
+        "description": "Design & Client",
+        "memberCount": 3,
+        "lead": { "memberId": "member-05", "name": "김민준", "avatarInitial": "민", "role": "Design & Client" },
+        "members": [
+          { "memberId": "member-05", "name": "김민준", "avatarInitial": "민", "role": "Design", "isLead": true },
+          { "memberId": "member-04", "name": "양지우", "avatarInitial": "지", "role": "Design", "isLead": false },
+          { "memberId": "member-22", "name": "김태연", "avatarInitial": "태", "role": "Design", "isLead": false }
+        ]
+      },
+      {
+        "id": "native-lab",
+        "name": "NativeLab",
+        "description": "연구 및 프로덕트 랩",
+        "memberCount": 5,
+        "lead": { "memberId": "member-01", "name": "김준표", "avatarInitial": "준", "role": "Lab Lead" },
+        "members": [
+          { "memberId": "member-01", "name": "김준표", "avatarInitial": "준", "role": "iOS", "isLead": true },
+          { "memberId": "member-02", "name": "이시우", "avatarInitial": "시", "role": "iOS", "isLead": false },
+          { "memberId": "member-04", "name": "양지우", "avatarInitial": "지", "role": "Frontend · Design", "isLead": false },
+          { "memberId": "member-06", "name": "박지성", "avatarInitial": "지", "role": "Android", "isLead": false },
+          { "memberId": "member-16", "name": "이채율", "avatarInitial": "채", "role": "DevOps", "isLead": false }
+        ]
+      }
+    ]
+  },
+  "members": [
+    {
+      "id": "member-01",
+      "name": "김준표",
+      "avatarInitial": "준",
+      "primaryOrg": "NativeLab",
+      "organizations": ["Native", "NativeLab"],
+      "primaryDepartment": "Leader",
+      "departments": ["Founder", "iOS", "Native Lab", "Native Ops"],
+      "role": "Founder",
+      "displaySubtitle": "Leader · Founder",
+      "majorLead": null,
+      "isLead": true,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "Book-on", "role": "iOS" },
+        { "project": "Moil", "role": "iOS & Design" }
+      ]
+    },
+    {
+      "id": "member-02",
+      "name": "이시우",
+      "avatarInitial": "시",
+      "primaryOrg": "NativeLab",
+      "organizations": ["Native", "NativeLab"],
+      "primaryDepartment": "NativeOps",
+      "departments": ["Leader", "iOS", "Native Lab", "Native Ops"],
+      "role": "Lead · iOS 전공 리더",
+      "displaySubtitle": "NativeOps · Lead",
+      "majorLead": "iOS",
+      "isLead": true,
+      "isNew": false,
+      "pmPoRoles": [
+        { "project": "GYMUP", "role": "PM" },
+        { "project": "Hopes", "role": "PO" }
+      ],
+      "projects": [
+        { "project": "Book-on", "role": "iOS" },
+        { "project": "Hopes", "role": "iOS" }
+      ]
+    },
+    {
+      "id": "member-03",
+      "name": "안율",
+      "avatarInitial": "율",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "NativeOps",
+      "departments": ["OL", "iOS", "Native Ops"],
+      "role": "Operator Lead · iOS",
+      "displaySubtitle": "NativeOps · 운영 리드",
+      "majorLead": null,
+      "isLead": true,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "Moil", "role": "iOS" },
+        { "project": "GYMUP", "role": "iOS" }
+      ]
+    },
+    {
+      "id": "member-04",
+      "name": "양지우",
+      "avatarInitial": "지",
+      "primaryOrg": "NativeLab",
+      "organizations": ["Native", "NativeLab"],
+      "primaryDepartment": "NativeOps",
+      "departments": ["Study Leader", "Frontend", "Design & Client", "Native Lab", "Native Ops"],
+      "role": "Study Lead · Frontend 전공 리더",
+      "displaySubtitle": "NativeOps · 스터디 리드",
+      "majorLead": "Frontend",
+      "isLead": true,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "Moil", "role": "Frontend" },
+        { "project": "Axyne", "role": "Frontend" }
+      ]
+    },
+    {
+      "id": "member-05",
+      "name": "김민준",
+      "avatarInitial": "민",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "FA",
+      "departments": ["FA", "iOS", "Design & Client"],
+      "role": "재무 담당 · iOS & Design",
+      "displaySubtitle": "FA · 재무 담당",
+      "majorLead": null,
+      "isLead": true,
+      "isNew": false,
+      "pmPoRoles": [
+        { "project": "TeamSpace", "role": "PM" }
+      ],
+      "projects": [
+        { "project": "Book-on", "role": "Design" },
+        { "project": "Hopes", "role": "Design" },
+        { "project": "Moil", "role": "iOS & Design" },
+        { "project": "TeamSpace", "role": "iOS & Design" },
+        { "project": "GYMUP", "role": "Design" }
+      ]
+    },
+    {
+      "id": "member-06",
+      "name": "박지성",
+      "avatarInitial": "지",
+      "primaryOrg": "NativeLab",
+      "organizations": ["Native", "NativeLab"],
+      "primaryDepartment": "NativeLab",
+      "departments": ["Android", "Native Lab"],
+      "role": "Android",
+      "displaySubtitle": "NativeLab · Android",
+      "majorLead": null,
+      "isLead": true,
+      "isNew": false,
+      "pmPoRoles": [
+        { "project": "Moil", "role": "PO" }
+      ],
+      "projects": [
+        { "project": "Book-on", "role": "Android" },
+        { "project": "Hopes", "role": "Android" },
+        { "project": "Moil", "role": "Android" }
+      ]
+    },
+    {
+      "id": "member-07",
+      "name": "옥물결",
+      "avatarInitial": "물",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "PMO",
+      "departments": ["iOS"],
+      "role": "PM (MOSS) · iOS & Design",
+      "displaySubtitle": "PMO · PM",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": false,
+      "pmPoRoles": [
+        { "project": "MOSS", "role": "PM" }
+      ],
+      "projects": [
+        { "project": "Book-on", "role": "Design" },
+        { "project": "TeamSpace", "role": "iOS & Design" },
+        { "project": "MOSS", "role": "iOS & Design" }
+      ]
+    },
+    {
+      "id": "member-08",
+      "name": "이수찬",
+      "avatarInitial": "수",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Flutter",
+      "departments": ["Flutter"],
+      "role": "Flutter",
+      "displaySubtitle": "Client · Flutter",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "TeamSpace", "role": "Flutter" },
+        { "project": "MOSS", "role": "Flutter" }
+      ]
+    },
+    {
+      "id": "member-09",
+      "name": "김은율",
+      "avatarInitial": "은",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Frontend",
+      "departments": ["Frontend"],
+      "role": "Frontend",
+      "displaySubtitle": "Frontend · Web",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "MOSS", "role": "Frontend" }
+      ]
+    },
+    {
+      "id": "member-10",
+      "name": "김주영",
+      "avatarInitial": "주",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Frontend",
+      "departments": ["Frontend"],
+      "role": "Frontend",
+      "displaySubtitle": "Frontend · Web",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "TeamSpace", "role": "Frontend" }
+      ]
+    },
+    {
+      "id": "member-11",
+      "name": "이은지",
+      "avatarInitial": "은",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Frontend",
+      "departments": ["Frontend"],
+      "role": "Frontend",
+      "displaySubtitle": "Frontend · Web",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "TeamSpace", "role": "Frontend" }
+      ]
+    },
+    {
+      "id": "member-12",
+      "name": "한승희",
+      "avatarInitial": "승",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Frontend",
+      "departments": ["Frontend"],
+      "role": "Frontend & Design",
+      "displaySubtitle": "Frontend · Web & Design",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "MOSS", "role": "Frontend & Design" }
+      ]
+    },
+    {
+      "id": "member-13",
+      "name": "전태양",
+      "avatarInitial": "태",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Backend",
+      "departments": ["Backend(server)"],
+      "role": "Backend",
+      "displaySubtitle": "Backend · Server",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": true,
+      "pmPoRoles": [],
+      "projects": []
+    },
+    {
+      "id": "member-14",
+      "name": "정인성",
+      "avatarInitial": "인",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Backend",
+      "departments": ["Backend(server)"],
+      "role": "Backend 전공 리더 · PM (Axyne)",
+      "displaySubtitle": "Backend · 전공 리더",
+      "majorLead": "Backend",
+      "isLead": true,
+      "isNew": false,
+      "pmPoRoles": [
+        { "project": "Axyne", "role": "PM" }
+      ],
+      "projects": [
+        { "project": "Book-on", "role": "Backend" },
+        { "project": "Moil", "role": "Backend" },
+        { "project": "TeamSpace", "role": "Backend" },
+        { "project": "Axyne", "role": "Backend" }
+      ]
+    },
+    {
+      "id": "member-15",
+      "name": "조현",
+      "avatarInitial": "현",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "NativeOps",
+      "departments": ["Backend(server)", "Native Ops"],
+      "role": "IT · Backend",
+      "displaySubtitle": "NativeOps · IT & Backend",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "TeamSpace", "role": "Backend" },
+        { "project": "GYMUP", "role": "Backend" }
+      ]
+    },
+    {
+      "id": "member-16",
+      "name": "이채율",
+      "avatarInitial": "채",
+      "primaryOrg": "NativeLab",
+      "organizations": ["Native", "NativeLab"],
+      "primaryDepartment": "NativeLab",
+      "departments": ["DevOps(infrastructure)", "Native Lab"],
+      "role": "DevOps 전공 리더",
+      "displaySubtitle": "NativeLab · DevOps 리드",
+      "majorLead": "DevOps",
+      "isLead": true,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "Axyne", "role": "DevOps" }
+      ]
+    },
+    {
+      "id": "member-17",
+      "name": "김민규",
+      "avatarInitial": "민",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "DevOps",
+      "departments": ["DevOps(infrastructure)"],
+      "role": "DevOps",
+      "displaySubtitle": "DevOps · Infrastructure",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "Hopes", "role": "DevOps" },
+        { "project": "MOSS", "role": "DevOps" }
+      ]
+    },
+    {
+      "id": "member-18",
+      "name": "김민선",
+      "avatarInitial": "민",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "iOS",
+      "departments": ["iOS"],
+      "role": "iOS",
+      "displaySubtitle": "Client · iOS",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": true,
+      "pmPoRoles": [],
+      "projects": []
+    },
+    {
+      "id": "member-19",
+      "name": "이예은",
+      "avatarInitial": "예",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "iOS",
+      "departments": ["iOS"],
+      "role": "iOS",
+      "displaySubtitle": "Client · iOS",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": true,
+      "pmPoRoles": [],
+      "projects": []
+    },
+    {
+      "id": "member-20",
+      "name": "신예빈",
+      "avatarInitial": "예",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Frontend",
+      "departments": ["Frontend"],
+      "role": "Frontend",
+      "displaySubtitle": "Frontend · Web",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": true,
+      "pmPoRoles": [],
+      "projects": []
+    },
+    {
+      "id": "member-21",
+      "name": "김도연",
+      "avatarInitial": "도",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Frontend",
+      "departments": ["Frontend"],
+      "role": "Frontend",
+      "displaySubtitle": "Frontend · Web",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": true,
+      "pmPoRoles": [],
+      "projects": []
+    },
+    {
+      "id": "member-22",
+      "name": "김태연",
+      "avatarInitial": "태",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Design",
+      "departments": ["Design & Client"],
+      "role": "Product Designer",
+      "displaySubtitle": "Design · Product Designer",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": false,
+      "pmPoRoles": [],
+      "projects": [
+        { "project": "Book-on", "role": "Design" }
+      ]
+    },
+    {
+      "id": "member-23",
+      "name": "전혜린",
+      "avatarInitial": "혜",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Frontend",
+      "departments": ["Frontend"],
+      "role": "Frontend",
+      "displaySubtitle": "Frontend · Web",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": true,
+      "pmPoRoles": [],
+      "projects": []
+    },
+    {
+      "id": "member-24",
+      "name": "임규범",
+      "avatarInitial": "규",
+      "primaryOrg": "Native",
+      "organizations": ["Native"],
+      "primaryDepartment": "Backend",
+      "departments": ["Backend(server)"],
+      "role": "Backend",
+      "displaySubtitle": "Backend · Server",
+      "majorLead": null,
+      "isLead": false,
+      "isNew": true,
+      "pmPoRoles": [],
+      "projects": []
+    }
+  ],
+  "projects": [
+    {
+      "id": "proj-bookon",
+      "name": "Book-on",
+      "leader": null,
+      "members": [
+        { "memberId": "member-01", "name": "김준표", "role": "iOS" },
+        { "memberId": "member-02", "name": "이시우", "role": "iOS" },
+        { "memberId": "member-05", "name": "김민준", "role": "Design" },
+        { "memberId": "member-06", "name": "박지성", "role": "Android" },
+        { "memberId": "member-07", "name": "옥물결", "role": "Design" },
+        { "memberId": "member-14", "name": "정인성", "role": "Backend" },
+        { "memberId": "member-22", "name": "김태연", "role": "Design" }
+      ]
+    },
+    {
+      "id": "proj-hopes",
+      "name": "Hopes",
+      "leader": { "memberId": "member-02", "name": "이시우", "type": "PO" },
+      "members": [
+        { "memberId": "member-02", "name": "이시우", "role": "iOS" },
+        { "memberId": "member-05", "name": "김민준", "role": "Design" },
+        { "memberId": "member-06", "name": "박지성", "role": "Android" },
+        { "memberId": "member-17", "name": "김민규", "role": "DevOps" }
+      ]
+    },
+    {
+      "id": "proj-moil",
+      "name": "Moil",
+      "leader": { "memberId": "member-06", "name": "박지성", "type": "PO" },
+      "members": [
+        { "memberId": "member-01", "name": "김준표", "role": "iOS & Design" },
+        { "memberId": "member-03", "name": "안율", "role": "iOS" },
+        { "memberId": "member-04", "name": "양지우", "role": "Frontend" },
+        { "memberId": "member-05", "name": "김민준", "role": "iOS & Design" },
+        { "memberId": "member-06", "name": "박지성", "role": "Android" },
+        { "memberId": "member-14", "name": "정인성", "role": "Backend" }
+      ]
+    },
+    {
+      "id": "proj-teamspace",
+      "name": "TeamSpace",
+      "leader": { "memberId": "member-05", "name": "김민준", "type": "PM" },
+      "members": [
+        { "memberId": "member-05", "name": "김민준", "role": "iOS & Design" },
+        { "memberId": "member-07", "name": "옥물결", "role": "iOS & Design" },
+        { "memberId": "member-08", "name": "이수찬", "role": "Flutter" },
+        { "memberId": "member-10", "name": "김주영", "role": "Frontend" },
+        { "memberId": "member-11", "name": "이은지", "role": "Frontend" },
+        { "memberId": "member-14", "name": "정인성", "role": "Backend" },
+        { "memberId": "member-15", "name": "조현", "role": "Backend" }
+      ]
+    },
+    {
+      "id": "proj-moss",
+      "name": "MOSS",
+      "leader": { "memberId": "member-07", "name": "옥물결", "type": "PM" },
+      "members": [
+        { "memberId": "member-07", "name": "옥물결", "role": "iOS & Design" },
+        { "memberId": "member-08", "name": "이수찬", "role": "Flutter" },
+        { "memberId": "member-09", "name": "김은율", "role": "Frontend" },
+        { "memberId": "member-12", "name": "한승희", "role": "Frontend & Design" },
+        { "memberId": "member-17", "name": "김민규", "role": "DevOps" }
+      ]
+    },
+    {
+      "id": "proj-gymup",
+      "name": "GYMUP",
+      "leader": { "memberId": "member-02", "name": "이시우", "type": "PM" },
+      "members": [
+        { "memberId": "member-03", "name": "안율", "role": "iOS" },
+        { "memberId": "member-05", "name": "김민준", "role": "Design" },
+        { "memberId": "member-15", "name": "조현", "role": "Backend" }
+      ]
+    },
+    {
+      "id": "proj-axyne",
+      "name": "Axyne",
+      "leader": { "memberId": "member-14", "name": "정인성", "type": "PM" },
+      "members": [
+        { "memberId": "member-04", "name": "양지우", "role": "Frontend" },
+        { "memberId": "member-14", "name": "정인성", "role": "Backend" },
+        { "memberId": "member-16", "name": "이채율", "role": "DevOps" }
+      ]
+    }
+  ]
+}
