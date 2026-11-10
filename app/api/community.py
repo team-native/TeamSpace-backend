@@ -27,6 +27,7 @@ from app.services.anonymity import (
     public_content_payload,
     resolve_anonymous_owner,
 )
+from app.services.content_views import count_content_view
 from app.services.notice_schedule import is_notice_visible
 
 router = APIRouter()
@@ -119,7 +120,9 @@ def _post_view(
         anonymous_author_numbers: dict[str, int] = {}
         for comment in comments:
             comment_data = comment.payload
-            if not comment_data.get("anonymous") or comment_data.get("isPostAuthor"):
+            if not comment_data.get("anonymous"):
+                continue
+            if anonymous and comment_data.get("isPostAuthor"):
                 continue
             owner_key = str(
                 comment_data.get("anonymousOwnerKey", f"comment:{comment.id}")
@@ -133,15 +136,19 @@ def _post_view(
             owner_key = str(
                 comment_data.get("anonymousOwnerKey", f"comment:{comment.id}")
             )
-            is_labeled_anonymous = (
-                comment_data.get("anonymous")
-                and not comment_data.get("isPostAuthor")
-                and anonymous
+            is_author_label = anonymous and comment_data.get("isPostAuthor")
+            number = (
+                None
+                if is_author_label or not comment_data.get("anonymous")
+                else anonymous_author_numbers.get(owner_key)
             )
             anonymous_labels_by_comment_id[str(comment.id)] = (
-                f"익명 {anonymous_author_numbers[owner_key]}"
-                if is_labeled_anonymous
-                else None
+                "글쓴이"
+                if is_author_label
+                else f"익명 {number}"
+                if number
+                else None,
+                number,
             )
         result["comments"] = [
             _comment_view(
@@ -152,7 +159,10 @@ def _post_view(
                 author_name=comment_author_names.get(comment.owner_id),
                 author_preloaded=True,
                 liked=str(comment.id) in liked_comment_ids,
-                anonymous_author_label=anonymous_labels_by_comment_id[str(comment.id)],
+                anonymous_author_label=anonymous_labels_by_comment_id[
+                    str(comment.id)
+                ][0],
+                anonymous_number=anonymous_labels_by_comment_id[str(comment.id)][1],
             )
             for comment in comments
         ]
@@ -168,6 +178,7 @@ def _comment_view(
     author_preloaded: bool = False,
     liked: bool = False,
     anonymous_author_label: str | None = None,
+    anonymous_number: int | None = None,
 ) -> dict[str, Any]:
     data = record.payload
     author = (
@@ -186,10 +197,12 @@ def _comment_view(
         "liked": liked,
         "replyTo": data.get("replyTo"),
     }
-    if post_anonymous and data.get("isPostAuthor"):
+    if anonymous_author_label == "글쓴이":
         result["author"] = "글쓴이"
-    elif post_anonymous and data.get("anonymous"):
+    elif data.get("anonymous"):
         result["author"] = anonymous_author_label or "익명"
+        if anonymous_number is not None:
+            result["anonymousNumber"] = anonymous_number
     elif not data.get("anonymous"):
         result["author"] = author_name or (author.name if author else "알 수 없음")
     result["mine"] = is_record_owner(record, viewer)
@@ -402,8 +415,7 @@ def get_post(
     status = post.payload.get("status", "published")
     if status != "published" and not is_record_owner(post, user):
         raise HTTPException(404, "게시글을 찾을 수 없습니다.")
-    post.payload = {**post.payload, "views": int(post.payload.get("views", 0)) + 1}
-    db.commit()
+    post = count_content_view(db, "post", post, user)
     return envelope(_post_view(post, db, user, True))
 
 
@@ -542,6 +554,19 @@ def _proposal_view(
             if comment_owner_ids
             else {}
         )
+        anonymous_numbers: dict[str, int] = {}
+        for comment in comments:
+            comment_data = comment.payload
+            if not comment_data.get("anonymous"):
+                continue
+            if anonymous and comment_data.get("isProposalAuthor"):
+                continue
+            owner_key = str(
+                comment_data.get(
+                    "anonymousOwnerKey", f"proposal-comment:{comment.id}"
+                )
+            )
+            anonymous_numbers.setdefault(owner_key, len(anonymous_numbers) + 1)
         comment_items = []
         for comment in comments:
             comment_data = comment.payload
@@ -552,21 +577,52 @@ def _proposal_view(
                 "anonymous": bool(comment_data.get("anonymous")),
                 "mine": is_record_owner(comment, user),
             }
-            if data.get("anonymous") and comment_data.get("isProposalAuthor"):
+            if (
+                anonymous
+                and comment_data.get("anonymous")
+                and comment_data.get("isProposalAuthor")
+            ):
                 item["author"] = "글쓴이"
+            elif comment_data.get("anonymous"):
+                owner_key = str(
+                    comment_data.get(
+                        "anonymousOwnerKey", f"proposal-comment:{comment.id}"
+                    )
+                )
+                number = anonymous_numbers.get(owner_key)
+                item["author"] = f"익명 {number}" if number is not None else "익명"
+                if number is not None:
+                    item["anonymousNumber"] = number
             elif not comment_data.get("anonymous"):
                 item["author"] = comment_author_names.get(
                     comment.owner_id, "알 수 없음"
                 )
             comment_items.append(item)
-        for comment in data.get("comments", []):
+        legacy_comments = data.get("comments", [])
+        legacy_numbers: dict[str, int] = {}
+        for index, comment in enumerate(legacy_comments, start=1):
+            if not isinstance(comment, dict) or not comment.get("anonymous"):
+                continue
+            if anonymous and comment.get("isProposalAuthor"):
+                continue
+            owner_key = str(comment.get("anonymousOwnerKey", f"legacy:{index}"))
+            legacy_numbers[owner_key] = anonymous_numbers.setdefault(
+                owner_key, len(anonymous_numbers) + 1
+            )
+        for index, comment in enumerate(legacy_comments, start=1):
             legacy_comment = public_content_payload(comment)
             if legacy_comment.get("anonymous"):
                 is_author = legacy_comment.pop("isProposalAuthor", False)
-                if is_author:
+                if anonymous and is_author:
                     legacy_comment["author"] = "글쓴이"
                 else:
-                    legacy_comment.pop("author", None)
+                    owner_key = str(comment.get("anonymousOwnerKey", f"legacy:{index}"))
+                    number = legacy_numbers.get(owner_key)
+                    legacy_comment["author"] = (
+                        f"익명 {number}" if number is not None else "익명"
+                    )
+                    if number is not None:
+                        legacy_comment["anonymousNumber"] = number
             comment_items.append(legacy_comment)
         result["comments"] = comment_items
     return result
@@ -702,12 +758,7 @@ def get_proposal(
     user: User = Depends(get_current_user),
 ):
     proposal = get_record(db, "proposal", proposal_id)
-    try:
-        views = max(0, int(proposal.payload.get("views", 0) or 0)) + 1
-    except (TypeError, ValueError):
-        views = 1
-    proposal.payload = {**proposal.payload, "views": views}
-    db.commit()
+    proposal = count_content_view(db, "proposal", proposal, user)
     return envelope(_proposal_view(proposal, db, user, True))
 
 
@@ -823,18 +874,12 @@ def comment_on_proposal(
     else:
         data["author"] = user.name
     record = create_record(db, "proposal_comment", data, None if anonymous else user)
-    return envelope(
-        {
-            "id": str(record.id),
-            "text": text,
-            "anonymous": anonymous,
-            "author": "글쓴이"
-            if proposal.payload.get("anonymous") and data.get("isProposalAuthor")
-            else (None if anonymous else user.name),
-        },
-        "댓글을 등록했습니다.",
-        201,
+    proposal = get_record(db, "proposal", proposal_id)
+    proposal_view = _proposal_view(proposal, db, user, detail=True)
+    created_comment = next(
+        item for item in proposal_view["comments"] if item["id"] == str(record.id)
     )
+    return envelope(created_comment, "댓글을 등록했습니다.", 201)
 
 
 POST_CATEGORIES = {
@@ -1074,11 +1119,12 @@ def create_comment(
             "게시글에 새 댓글이 달렸습니다.",
             f"/inhouse/community/{post_id}",
         )
-    return envelope(
-        _comment_view(record, db, user, bool(post.payload.get("anonymous"))),
-        "댓글을 등록했습니다.",
-        201,
+    post = get_record(db, "post", post_id)
+    post_view = _post_view(post, db, user, detail=True)
+    created_comment = next(
+        item for item in post_view["comments"] if item["id"] == str(record.id)
     )
+    return envelope(created_comment, "댓글을 등록했습니다.", 201)
 
 
 @router.post("/posts/{post_id}/comments/{comment_id}/like", summary="댓글 공감")
@@ -1403,6 +1449,7 @@ def get_notice(
     notice = get_record(db, "notice", notice_id)
     if not is_notice_visible(notice.payload):
         raise HTTPException(404, "공지를 찾을 수 없습니다.")
+    notice = count_content_view(db, "notice", notice, user)
     data = notice.payload
     confirmation = db.scalar(
         select(Resource).where(
@@ -1422,12 +1469,7 @@ def get_notice(
         )
         or 0
     )
-    try:
-        views = max(0, int(data.get("views", 0) or 0)) + 1
-    except (TypeError, ValueError):
-        views = 1
-    notice.payload = {**data, "views": views}
-    db.commit()
+    views = int(data.get("views", 0) or 0)
     author = db.get(User, notice.owner_id) if notice.owner_id else None
     author_roles = author.roles or [] if author else []
     author_role = next(

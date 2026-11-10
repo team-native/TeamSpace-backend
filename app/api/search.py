@@ -9,6 +9,7 @@ from app.api.shared import envelope, iso, user_can_finance
 from app.db.session import get_db
 from app.models.resource import Resource
 from app.models.user import User
+from app.services.organization import find_directory_member
 
 router = APIRouter()
 
@@ -105,16 +106,22 @@ def search(
                 profile_data = profile_row.payload if profile_row else {}
                 person_dept = profile_data.get("dept", person.department or "")
                 role = profile_data.get("major", "")
+                member_id = profile_data.get("organizationMemberId")
+                public_id = (
+                    str(member_id)
+                    if member_id and find_directory_member(str(member_id))
+                    else str(person.id)
+                )
                 matches.append(
                     {
                         "category": "people",
-                        "id": str(person.id),
+                        "id": public_id,
                         "title": person.name,
                         "snippet": " · ".join(
                             value for value in (person_dept, role) if value
                         ),
                         "createdAt": iso(person.created_at),
-                        "href": f"/inhouse/people/{person.id}",
+                        "href": f"/inhouse/people/{public_id}",
                     }
                 )
             continue

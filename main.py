@@ -9,6 +9,7 @@ from app.api.router import api_router
 from app.core.config import settings
 from app.db.session import Base, SessionLocal, engine
 from app.models.bank import BankImport, BankSyncRun  # noqa: F401
+from app.models.content_view import ContentView  # noqa: F401
 from app.models.resource import Resource  # noqa: F401
 from app.models.user import User  # noqa: F401
 from app.services.anonymity import anonymize_legacy_content

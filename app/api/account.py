@@ -2,7 +2,7 @@ import hashlib
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field
@@ -42,7 +42,7 @@ class ProfilePatch(BaseModel):
     cohort: str | None = None
     github: str | None = None
     photo: str | None = None
-    avatarBackground: str | None = Field(default=None, max_length=40)
+    avatarBackground: Literal["GRAY", "BLUE", "YELLOW", "GREEN", "PINK"] | None = None
     bio: str | None = Field(default=None, max_length=60)
     interests: list[str] | None = None
 
@@ -209,12 +209,16 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
                     "lead": bool(member.get("isLead", False)),
                     "roles": ["Member"],
                     "active": True,
+                    "linked": False,
+                    "userId": None,
                 }
             )
             continue
         linked_user_ids.add(person.id)
         item = user_profile(db, person, profiles.get(person.id, {}), projects_by_user)
         item["id"] = member["id"]
+        item["linked"] = True
+        item["userId"] = str(person.id)
         item["dept"] = profiles.get(person.id, {}).get(
             "dept", person.department or member.get("primaryDepartment", "")
         )
@@ -231,6 +235,8 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
             item = user_profile(
                 db, person, profiles.get(person.id, {}), projects_by_user
             )
+            item["linked"] = False
+            item["userId"] = str(person.id)
             items.append(item)
     return items
 
