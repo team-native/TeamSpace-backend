@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.resource import Resource
 from app.models.user import User
 
 ORGANIZATION_PATH = Path(__file__).resolve().parents[1] / "data" / "organization.json"
@@ -28,12 +29,39 @@ def find_directory_member(member_id: str) -> dict[str, Any] | None:
 
 
 def find_user_for_member(db: Session, member: dict[str, Any]) -> User | None:
-    matches = list(db.scalars(select(User).where(User.name == member.get("name", ""))))
-    if len(matches) > 1:
-        raise HTTPException(
-            409, "동명이인이 있어 조직도 ID를 계정에 연결할 수 없습니다."
+    mapped_users = find_explicit_users_for_member(db, member)
+    if mapped_users:
+        return mapped_users[0]
+    return None
+
+
+def find_explicit_users_for_member(db: Session, member: dict[str, Any]) -> list[User]:
+    profiles = list(
+        db.scalars(
+            select(Resource).where(
+                Resource.resource_type == "profile",
+                Resource.payload["organizationMemberId"].as_string()
+                == member.get("id"),
+            )
         )
-    return matches[0] if matches else None
+    )
+    mapped_users = [
+        user
+        for profile in profiles
+        if (user := db.get(User, profile.owner_id)) is not None
+    ]
+    if len(mapped_users) > 1:
+        raise HTTPException(409, "조직도 멤버에 여러 계정이 연결되어 있습니다.")
+    return mapped_users
+
+
+def _profile_member_id(db: Session, user_id: int) -> str | None:
+    profile = db.scalar(
+        select(Resource).where(
+            Resource.resource_type == "profile", Resource.owner_id == user_id
+        )
+    )
+    return profile.payload.get("organizationMemberId") if profile else None
 
 
 def get_user_by_public_id(db: Session, public_id: str) -> User | None:
@@ -46,12 +74,7 @@ def get_user_by_public_id(db: Session, public_id: str) -> User | None:
 
 
 def get_public_user_id(db: Session, user: User) -> str:
-    matching_members = [
-        member
-        for member in load_organization().get("members", [])
-        if member.get("name") == user.name
-    ]
-    matching_users = list(db.scalars(select(User).where(User.name == user.name)))
-    if len(matching_members) == 1 and len(matching_users) == 1:
-        return str(matching_members[0]["id"])
+    member_id = _profile_member_id(db, user.id)
+    if member_id and find_directory_member(member_id):
+        return str(member_id)
     return str(user.id)

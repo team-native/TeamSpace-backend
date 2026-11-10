@@ -43,7 +43,12 @@ from app.services.anonymity import (
 from app.services.email import send_email
 from app.services.events import normalize_event_payload
 from app.services.notice_schedule import _parse_publish_at, is_notice_visible
-from app.services.organization import get_public_user_id, get_user_by_public_id
+from app.services.organization import (
+    find_directory_member,
+    find_explicit_users_for_member,
+    get_public_user_id,
+    get_user_by_public_id,
+)
 from app.services.security import hash_password
 
 router = APIRouter()
@@ -57,6 +62,13 @@ class SignupRejectRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+class SignupApproveRequest(BaseModel):
+    member_id: str | None = Field(default=None, alias="memberId")
+    temporary_password: str | None = Field(default=None, alias="temporaryPassword")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class UserRolesPatch(BaseModel):
     roles: list[str] = Field(min_length=1, max_length=1)
 
@@ -64,6 +76,9 @@ class UserRolesPatch(BaseModel):
 class AdminUserPatch(BaseModel):
     active: bool | None = None
     dept: str | None = Field(default=None, max_length=100)
+    member_id: str | None = Field(default=None, alias="memberId")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class AdminUserCreate(BaseModel):
@@ -1152,7 +1167,7 @@ def approve_signup(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
-    payload: dict[str, str] | None = Body(default=None),
+    payload: SignupApproveRequest | None = Body(default=None),
 ):
     require_admin(user)
     request = get_record(db, "signup_request", request_id)
@@ -1161,8 +1176,16 @@ def approve_signup(
     email = request.payload.get("email", "")
     if db.scalar(select(User.id).where(User.email == email)):
         raise HTTPException(409, "이메일이 이미 등록되었습니다.")
+    approval = payload or SignupApproveRequest()
+    member_id = approval.member_id
+    directory_member = find_directory_member(member_id) if member_id else None
+    if member_id and directory_member is None:
+        raise HTTPException(422, "조직도에서 해당 memberId를 찾을 수 없습니다.")
+    if member_id and find_explicit_users_for_member(db, directory_member):
+        raise HTTPException(409, "이미 계정이 연결된 조직도 멤버입니다.")
+
     password_hash = request.payload.get("passwordHash")
-    temporary_password = (payload or {}).get("temporaryPassword", "")
+    temporary_password = approval.temporary_password or ""
     if temporary_password:
         if len(temporary_password) < 8:
             raise HTTPException(400, "초기 비밀번호는 8자 이상이어야 합니다.")
@@ -1181,12 +1204,22 @@ def approve_signup(
     )
     db.add(member)
     db.flush()
+    if member_id:
+        db.add(
+            Resource(
+                resource_type="profile",
+                owner_id=member.id,
+                payload={"organizationMemberId": member_id},
+            )
+        )
     request.payload = {
         **request.payload,
         "status": "APPROVED",
         "approvedBy": user.name,
         "userId": member.id,
     }
+    if member_id:
+        request.payload["memberId"] = member_id
     db.commit()
     notify_user(
         db,
@@ -1197,7 +1230,12 @@ def approve_signup(
     )
     background_tasks.add_task(_send_signup_approved_email, member.email, member.name)
     return envelope(
-        {"userId": str(member.id), "status": "APPROVED"}, "가입 요청을 승인했습니다."
+        {
+            "userId": str(member.id),
+            "memberId": member_id,
+            "status": "APPROVED",
+        },
+        "가입 요청을 승인했습니다.",
     )
 
 
@@ -1269,19 +1307,52 @@ def patch_admin_user(
         raise HTTPException(404, "사용자를 찾을 수 없습니다.")
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
-        raise HTTPException(422, "active 또는 dept 값을 입력해주세요.")
+        raise HTTPException(422, "active, dept 또는 memberId 값을 입력해주세요.")
+    profile_data = {}
     if "dept" in changes:
         dept = changes["dept"]
         if dept is not None and not dept.strip():
             raise HTTPException(422, "부서명은 비워둘 수 없습니다.")
         target.department = dept.strip() if dept else None
+        profile_data["dept"] = target.department or ""
+    if "member_id" in changes:
+        member_id = changes["member_id"]
+        if member_id is not None:
+            directory_member = find_directory_member(member_id)
+            if directory_member is None:
+                raise HTTPException(422, "조직도에서 해당 memberId를 찾을 수 없습니다.")
+            linked_users = find_explicit_users_for_member(db, directory_member)
+            if linked_users and linked_users[0].id != target.id:
+                raise HTTPException(409, "이미 다른 계정이 연결된 조직도 멤버입니다.")
+            profile_data["organizationMemberId"] = member_id
+        else:
+            profile_data["organizationMemberId"] = None
+    if "dept" in changes or "member_id" in changes:
         profile = db.scalar(
             select(Resource).where(
                 Resource.resource_type == "profile", Resource.owner_id == target.id
             )
         )
         if profile:
-            profile.payload = {**profile.payload, "dept": target.department or ""}
+            updated_profile = {**profile.payload}
+            for key, value in profile_data.items():
+                if key == "organizationMemberId" and value is None:
+                    updated_profile.pop(key, None)
+                else:
+                    updated_profile[key] = value
+            profile.payload = updated_profile
+        elif profile_data:
+            db.add(
+                Resource(
+                    resource_type="profile",
+                    owner_id=target.id,
+                    payload={
+                        key: value
+                        for key, value in profile_data.items()
+                        if value is not None
+                    },
+                )
+            )
     if "active" in changes:
         if changes["active"] is None:
             raise HTTPException(422, "active는 true 또는 false여야 합니다.")

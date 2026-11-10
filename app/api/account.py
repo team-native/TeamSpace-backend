@@ -157,15 +157,17 @@ def get_people(
 def _people_items(db: Session) -> list[dict[str, Any]]:
     directory = load_organization().get("members", [])
     users = list(db.scalars(select(User).order_by(User.id)))
-    users_by_name: dict[str, list[User]] = {}
-    for person in users:
-        users_by_name.setdefault(person.name, []).append(person)
     profiles = {
         profile.owner_id: profile.payload
         for profile in db.scalars(
             select(Resource).where(Resource.resource_type == "profile")
         )
     }
+    users_by_member_id: dict[str, list[User]] = {}
+    for person in users:
+        member_id = profiles.get(person.id, {}).get("organizationMemberId")
+        if member_id:
+            users_by_member_id.setdefault(str(member_id), []).append(person)
     projects_by_user: dict[str, list[list[str]]] = {}
     for project in db.scalars(
         select(Resource).where(Resource.resource_type == "project")
@@ -178,8 +180,10 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
     items = []
     linked_user_ids = set()
     for member in directory:
-        matches = users_by_name.get(member.get("name", ""), [])
-        person = matches[0] if len(matches) == 1 else None
+        mapped_matches = users_by_member_id.get(member["id"], [])
+        if len(mapped_matches) > 1:
+            raise HTTPException(409, "조직도 멤버에 여러 계정이 연결되어 있습니다.")
+        person = mapped_matches[0] if mapped_matches else None
         if person is None:
             projects = [
                 [entry.get("project", ""), entry.get("role", "Member")]
