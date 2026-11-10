@@ -121,8 +121,12 @@ def _post_view(
             comment_data = comment.payload
             if not comment_data.get("anonymous") or comment_data.get("isPostAuthor"):
                 continue
-            owner_key = str(comment_data.get("anonymousOwnerKey", f"comment:{comment.id}"))
-            anonymous_author_numbers.setdefault(owner_key, len(anonymous_author_numbers) + 1)
+            owner_key = str(
+                comment_data.get("anonymousOwnerKey", f"comment:{comment.id}")
+            )
+            anonymous_author_numbers.setdefault(
+                owner_key, len(anonymous_author_numbers) + 1
+            )
         anonymous_labels_by_comment_id = {}
         for comment in comments:
             comment_data = comment.payload
@@ -148,9 +152,7 @@ def _post_view(
                 author_name=comment_author_names.get(comment.owner_id),
                 author_preloaded=True,
                 liked=str(comment.id) in liked_comment_ids,
-                anonymous_author_label=anonymous_labels_by_comment_id[
-                    str(comment.id)
-                ],
+                anonymous_author_label=anonymous_labels_by_comment_id[str(comment.id)],
             )
             for comment in comments
         ]
@@ -342,16 +344,14 @@ def get_posts(
     page_records = records[:limit]
     counts = {str(record.id): 0 for record in page_records}
     if page_records:
+        post_id_expr = Resource.payload["postId"].as_string()
         count_rows = db.execute(
-            select(
-                Resource.payload["postId"].as_string(),
-                func.count(Resource.id),
-            )
+            select(post_id_expr, func.count(Resource.id))
             .where(
                 Resource.resource_type == "comment",
-                Resource.payload["postId"].as_string().in_(counts),
+                post_id_expr.in_(counts),
             )
-            .group_by(Resource.payload["postId"].as_string())
+            .group_by(post_id_expr)
         )
         counts.update({post_id: count for post_id, count in count_rows})
     owner_ids = {
