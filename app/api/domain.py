@@ -1,5 +1,3 @@
-import json
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -12,6 +10,7 @@ from app.db.session import get_db
 from app.models.resource import Resource
 from app.models.user import User
 from app.services.anonymity import resolve_anonymous_owner
+from app.services.organization import load_organization
 
 router = APIRouter(
     tags=[
@@ -166,12 +165,168 @@ def organization_tree(
 
 @router.get("/organization", summary="조직 및 팀원 화면 데이터")
 def get_organization(
-    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db), _: User = Depends(get_current_user)
 ):
-    data_path = Path(__file__).resolve().parents[1] / "data" / "organization.json"
-    with data_path.open(encoding="utf-8") as organization_file:
-        organization = json.load(organization_file)
+    organization = load_organization()
+    members = organization.setdefault("members", [])
+    groups = organization.setdefault("organizationChart", {}).setdefault("groups", [])
+    users = list(
+        db.scalars(select(User).where(User.active.is_(True)).order_by(User.id))
+    )
+    profiles = {
+        profile.owner_id: profile.payload or {}
+        for profile in db.scalars(
+            select(Resource).where(Resource.resource_type == "profile")
+        )
+    }
+    members_by_id = {str(member.get("id")): member for member in members}
+    linked_ids: set[int] = set()
+    department_group_names = {
+        "NativeOps", "FA", "PMO", "Core Platform", "Design", "NativeLab", "IT"
+    }
+
+    for account in users:
+        profile = profiles.get(account.id, {})
+        member_id = str(profile.get("organizationMemberId", ""))
+        if not member_id or member_id not in members_by_id:
+            continue
+        member = members_by_id[member_id]
+        linked_ids.add(account.id)
+        department = account.department or ""
+        previous_department = str(member.get("primaryDepartment") or "")
+        major = str(profile.get("major") or "").strip()
+        member.update(
+            {
+                "name": account.name,
+                "email": account.email,
+                "primaryDepartment": department or member.get("primaryDepartment", ""),
+                "displaySubtitle": _member_subtitle(department, major),
+            }
+        )
+        if major:
+            member["major"] = major
+        _move_member_to_department_group(
+            groups,
+            member_id,
+            account.name,
+            major,
+            department,
+            department_group_names,
+            previous_department,
+        )
+
+    for account in users:
+        if account.id in linked_ids:
+            continue
+        profile = profiles.get(account.id, {})
+        department = account.department or ""
+        major = str(profile.get("major") or "").strip()
+        member_id = str(account.id)
+        member = {
+            "id": member_id,
+            "name": account.name,
+            "email": account.email,
+            "avatarInitial": account.name[:1],
+            "primaryOrg": "NativeLab" if department == "NativeLab" else "Native",
+            "organizations": ["Native", "NativeLab"]
+            if department == "NativeLab"
+            else ["Native"],
+            "primaryDepartment": department,
+            "departments": [major] if major else [],
+            "major": major,
+            "role": major,
+            "displaySubtitle": _member_subtitle(department, major),
+            "majorLead": None,
+            "isLeader": False,
+            "isLead": False,
+            "isNew": False,
+            "pmPoRoles": [],
+            "projects": [],
+        }
+        members.append(member)
+        members_by_id[member_id] = member
+        _move_member_to_department_group(
+            groups, member_id, account.name, major, department, department_group_names
+        )
+
+    metadata = organization.setdefault("meta", {})
+    metadata["totalMembers"] = len(members)
+    counts = metadata.setdefault("organizationCounts", {})
+    counts["all"] = len(members)
+    for organization_name in ("Native", "NativeLab"):
+        counts[organization_name] = sum(
+            organization_name in member.get("organizations", []) for member in members
+        )
     return organization
+
+
+def _member_subtitle(department: str, major: str) -> str:
+    if department in {"NativeLab", "NativeOps", "FA", "IT"}:
+        return f"{department} · {major}" if major else department
+    return major
+
+
+def _move_member_to_department_group(
+    groups: list[dict],
+    member_id: str,
+    name: str,
+    major: str,
+    department: str,
+    department_group_names: set[str],
+    previous_department: str = "",
+) -> None:
+    target_group = next(
+        (item for item in groups if item.get("name") == department), None
+    )
+    existing = next(
+        (
+            item
+            for item in (target_group or {}).get("members", [])
+            if str(item.get("memberId")) == member_id
+        ),
+        None,
+    )
+    for group in groups:
+        if group.get("name") in {
+            *department_group_names,
+            department,
+            previous_department,
+        }:
+            group["members"] = [
+                member
+                for member in group.get("members", [])
+                if str(member.get("memberId")) != member_id
+            ]
+            group["memberCount"] = len(group["members"])
+            for leader_key in ("leader", "lead"):
+                leader = group.get(leader_key)
+                if leader and str(leader.get("memberId")) == member_id:
+                    group[leader_key] = None
+    if not department:
+        return
+    group = next((item for item in groups if item.get("name") == department), None)
+    if group is None:
+        group = {
+            "id": f"department-{department.casefold().replace(' ', '-')}",
+            "name": department,
+            "description": department,
+            "leader": None,
+            "lead": None,
+            "members": [],
+        }
+        groups.append(group)
+    group_members = group.setdefault("members", [])
+    group_members.append(
+        {
+            "memberId": member_id,
+            "name": name,
+            "avatarInitial": name[:1],
+            "role": major,
+            "isLeader": bool(existing and existing.get("isLeader")),
+            "isLead": bool(existing and existing.get("isLead")),
+        }
+    )
+    group["memberCount"] = len(group_members)
 
 
 @router.get("/dashboard/home", summary="대시보드 조회")

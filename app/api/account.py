@@ -32,6 +32,7 @@ from app.services.security import hash_password
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+CARD_ORGANIZATIONS = {"NativeLab", "NativeOps", "FA", "IT"}
 
 
 class ProfilePatch(BaseModel):
@@ -185,6 +186,27 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
             raise HTTPException(409, "조직도 멤버에 여러 계정이 연결되어 있습니다.")
         person = mapped_matches[0] if mapped_matches else None
         if person is None:
+            raw_department = str(member.get("primaryDepartment", "") or "")
+            card_department = (
+                raw_department
+                if raw_department in CARD_ORGANIZATIONS
+                else str(member.get("primaryOrg", "") or "")
+                if member.get("primaryOrg") in CARD_ORGANIZATIONS
+                else ""
+            )
+            major = str(
+                member.get("major")
+                or next(
+                    (
+                        department
+                        for department in member.get("departments", [])
+                        if department not in CARD_ORGANIZATIONS
+                    ),
+                    raw_department
+                    if raw_department not in CARD_ORGANIZATIONS
+                    else "",
+                )
+            )
             projects = [
                 [entry.get("project", ""), entry.get("role", "Member")]
                 for entry in member.get("projects", [])
@@ -194,9 +216,11 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
                     "id": member["id"],
                     "name": member.get("name", ""),
                     "email": "",
-                    "dept": member.get("primaryDepartment", ""),
-                    "role": member.get("role", ""),
-                    "major": member.get("role", ""),
+                    "dept": card_department,
+                    "department": raw_department,
+                    "role": major,
+                    "major": major,
+                    "displaySubtitle": _people_subtitle(card_department, major),
                     "cohort": "",
                     "github": "",
                     "photo": "",
@@ -219,10 +243,27 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
         item["id"] = member["id"]
         item["linked"] = True
         item["userId"] = str(person.id)
-        item["dept"] = profiles.get(person.id, {}).get(
-            "dept", person.department or member.get("primaryDepartment", "")
+        raw_department = person.department or profiles.get(person.id, {}).get(
+            "dept", member.get("primaryDepartment", "")
         )
-        item["role"] = item.get("role") or member.get("role", "")
+        major = str(
+            profiles.get(person.id, {}).get("major")
+            or next(
+                (
+                    department
+                    for department in member.get("departments", [])
+                    if department not in CARD_ORGANIZATIONS
+                ),
+                "",
+            )
+        )
+        item["department"] = raw_department
+        item["dept"] = (
+            raw_department if raw_department in CARD_ORGANIZATIONS else ""
+        )
+        item["role"] = major
+        item["major"] = major
+        item["displaySubtitle"] = _people_subtitle(item["dept"], major)
         if not item.get("projects"):
             item["projects"] = [
                 [entry.get("project", ""), entry.get("role", "Member")]
@@ -235,10 +276,27 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
             item = user_profile(
                 db, person, profiles.get(person.id, {}), projects_by_user
             )
+            raw_department = person.department or profiles.get(person.id, {}).get(
+                "dept", ""
+            )
+            major = str(profiles.get(person.id, {}).get("major") or "")
+            item["department"] = raw_department
+            item["dept"] = (
+                raw_department if raw_department in CARD_ORGANIZATIONS else ""
+            )
+            item["role"] = major
+            item["major"] = major
+            item["displaySubtitle"] = _people_subtitle(item["dept"], major)
             item["linked"] = False
             item["userId"] = str(person.id)
             items.append(item)
     return items
+
+
+def _people_subtitle(department: str, major: str) -> str:
+    if department and major:
+        return f"{department} · {major}"
+    return department or major
 
 
 @router.get("/people/{person_id}", summary="팀원 상세")
