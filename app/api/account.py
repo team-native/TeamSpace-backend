@@ -25,8 +25,11 @@ from app.models.resource import Resource
 from app.models.user import User
 from app.services.email import EmailConfigurationError, EmailDeliveryError, send_email
 from app.services.organization import (
-    find_directory_member,
+    build_user_member_id_map,
+    get_user_by_public_id,
+    is_admin_account,
     load_organization,
+    normalize_department_name,
 )
 from app.services.security import hash_password
 
@@ -98,7 +101,9 @@ def patch_me(
     if "name" in data and data["name"] is not None:
         user.name = data.pop("name")
     if "dept" in data and data["dept"] is not None:
-        user.department = data["dept"]
+        normalized_dept = normalize_department_name(data["dept"])
+        data["dept"] = normalized_dept
+        user.department = normalized_dept
     if (
         "interests" in data
         and data["interests"] is not None
@@ -131,7 +136,12 @@ def get_people(
 ):
     people = _people_items(db)
     if dept:
-        people = [person for person in people if person.get("dept") == dept]
+        normalized_dept = normalize_department_name(dept)
+        people = [
+            person
+            for person in people
+            if normalize_department_name(person.get("dept")) == normalized_dept
+        ]
     if q:
         query = q.strip().casefold()
         people = [
@@ -156,14 +166,21 @@ def get_people(
 
 
 def _people_items(db: Session) -> list[dict[str, Any]]:
-    directory = load_organization().get("members", [])
-    users = list(db.scalars(select(User).order_by(User.id)))
+    org_data = load_organization()
+    directory = org_data.get("members", [])
+    groups = org_data.get("organizationChart", {}).get("groups", [])
+    users = [
+        u
+        for u in db.scalars(select(User).order_by(User.id))
+        if not is_admin_account(u)
+    ]
     profiles = {
-        profile.owner_id: profile.payload
+        profile.owner_id: (profile.payload or {})
         for profile in db.scalars(
             select(Resource).where(Resource.resource_type == "profile")
         )
     }
+    member_id_map = build_user_member_id_map(db, directory)
     users_by_member_id: dict[str, list[User]] = {}
     for person in users:
         member_id = profiles.get(person.id, {}).get("organizationMemberId")
@@ -186,13 +203,15 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
             raise HTTPException(409, "조직도 멤버에 여러 계정이 연결되어 있습니다.")
         person = mapped_matches[0] if mapped_matches else None
         if person is None:
-            raw_department = str(member.get("primaryDepartment", "") or "")
+            raw_department = normalize_department_name(
+                str(member.get("primaryDepartment", "") or ""), groups
+            )
             card_department = (
                 raw_department
                 if raw_department in CARD_ORGANIZATIONS
                 else str(member.get("primaryOrg", "") or "")
                 if member.get("primaryOrg") in CARD_ORGANIZATIONS
-                else ""
+                else raw_department
             )
             major = str(
                 member.get("major")
@@ -214,6 +233,7 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
             items.append(
                 {
                     "id": member["id"],
+                    "href": f"/inhouse/people/{member['id']}",
                     "name": member.get("name", ""),
                     "email": "",
                     "dept": card_department,
@@ -241,10 +261,15 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
         linked_user_ids.add(person.id)
         item = user_profile(db, person, profiles.get(person.id, {}), projects_by_user)
         item["id"] = member["id"]
+        item["href"] = f"/inhouse/people/{member['id']}"
         item["linked"] = True
         item["userId"] = str(person.id)
-        raw_department = person.department or profiles.get(person.id, {}).get(
-            "dept", member.get("primaryDepartment", "")
+        raw_department = normalize_department_name(
+            person.department
+            or profiles.get(person.id, {}).get(
+                "dept", member.get("primaryDepartment", "")
+            ),
+            groups,
         )
         major = str(
             profiles.get(person.id, {}).get("major")
@@ -258,9 +283,7 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
             )
         )
         item["department"] = raw_department
-        item["dept"] = (
-            raw_department if raw_department in CARD_ORGANIZATIONS else ""
-        )
+        item["dept"] = raw_department
         item["role"] = major
         item["major"] = major
         item["displaySubtitle"] = _people_subtitle(item["dept"], major)
@@ -273,21 +296,23 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
 
     for person in users:
         if person.id not in linked_user_ids:
+            public_id = member_id_map[person.id]
             item = user_profile(
                 db, person, profiles.get(person.id, {}), projects_by_user
             )
-            raw_department = person.department or profiles.get(person.id, {}).get(
-                "dept", ""
+            raw_department = normalize_department_name(
+                person.department or profiles.get(person.id, {}).get("dept", ""),
+                groups,
             )
             major = str(profiles.get(person.id, {}).get("major") or "")
+            item["id"] = public_id
+            item["href"] = f"/inhouse/people/{public_id}"
             item["department"] = raw_department
-            item["dept"] = (
-                raw_department if raw_department in CARD_ORGANIZATIONS else ""
-            )
-            item["role"] = major
+            item["dept"] = raw_department
+            item["role"] = major or raw_department
             item["major"] = major
-            item["displaySubtitle"] = _people_subtitle(item["dept"], major)
-            item["linked"] = False
+            item["displaySubtitle"] = _people_subtitle(raw_department, major)
+            item["linked"] = True
             item["userId"] = str(person.id)
             items.append(item)
     return items
@@ -303,19 +328,21 @@ def _people_subtitle(department: str, major: str) -> str:
 def get_person(
     person_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_user)
 ):
-    member = find_directory_member(person_id)
-    if member:
-        item = next(
-            (item for item in _people_items(db) if item["id"] == person_id), None
-        )
-        if item:
-            return envelope(item)
-    try:
-        person = db.get(User, int(person_id))
-    except ValueError:
-        person = None
-    if person is None:
+    people = _people_items(db)
+    item = next(
+        (person for person in people if person["id"] == person_id), None
+    )
+    if item:
+        return envelope(item)
+    person = get_user_by_public_id(db, person_id)
+    if person is None or is_admin_account(person):
         raise HTTPException(404, "팀원을 찾을 수 없습니다.")
+    mapped = next(
+        (entry for entry in people if entry.get("userId") == str(person.id)),
+        None,
+    )
+    if mapped:
+        return envelope(mapped)
     return envelope(user_profile(db, person))
 
 
@@ -335,6 +362,7 @@ def signup_request(payload: SignupRequest, db: Session = Depends(get_db)):
         raise HTTPException(409, "이미 검토 중인 가입 요청이 있습니다.")
     data = payload.model_dump(exclude={"password"})
     data["email"] = str(payload.email)
+    data["dept"] = normalize_department_name(payload.dept)
     if payload.password:
         data["passwordHash"] = hash_password(payload.password)
     data.update(

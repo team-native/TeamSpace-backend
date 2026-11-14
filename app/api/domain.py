@@ -1,7 +1,7 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -10,7 +10,12 @@ from app.db.session import get_db
 from app.models.resource import Resource
 from app.models.user import User
 from app.services.anonymity import resolve_anonymous_owner
-from app.services.organization import load_organization
+from app.services.organization import (
+    build_user_member_id_map,
+    is_admin_account,
+    load_organization,
+    normalize_department_name,
+)
 
 router = APIRouter(
     tags=[
@@ -58,13 +63,6 @@ def listing(
     )
     records = list(db.scalars(stmt.offset((page - 1) * limit).limit(limit)))
     total = (
-        db.scalar(select(Resource.id).where(Resource.resource_type == kind).count())
-        if False
-        else None
-    )
-    from sqlalchemy import func
-
-    total = (
         db.scalar(
             select(func.count())
             .select_from(Resource)
@@ -99,8 +97,6 @@ def list_users(
     users = list(
         db.scalars(stmt.order_by(User.id).offset((page - 1) * limit).limit(limit))
     )
-    from sqlalchemy import func
-
     total = (
         db.scalar(
             select(func.count())
@@ -149,7 +145,9 @@ def organization_tree(
 ):
     departments: dict[str, list] = {}
     for user in db.scalars(select(User).order_by(User.name)):
-        name = user.department or "미지정"
+        if is_admin_account(user):
+            continue
+        name = normalize_department_name(user.department) or "미지정"
         departments.setdefault(name, []).append(
             {"id": user.id, "name": user.name, "role": (user.roles or [""])[0]}
         )
@@ -170,15 +168,18 @@ def get_organization(
     organization = load_organization()
     members = organization.setdefault("members", [])
     groups = organization.setdefault("organizationChart", {}).setdefault("groups", [])
-    users = list(
-        db.scalars(select(User).where(User.active.is_(True)).order_by(User.id))
-    )
+    users = [
+        u
+        for u in db.scalars(select(User).where(User.active.is_(True)).order_by(User.id))
+        if not is_admin_account(u)
+    ]
     profiles = {
         profile.owner_id: profile.payload or {}
         for profile in db.scalars(
             select(Resource).where(Resource.resource_type == "profile")
         )
     }
+    member_id_map = build_user_member_id_map(db, members)
     members_by_id = {str(member.get("id")): member for member in members}
     linked_ids: set[int] = set()
     department_group_names = {
@@ -192,8 +193,12 @@ def get_organization(
             continue
         member = members_by_id[member_id]
         linked_ids.add(account.id)
-        department = account.department or ""
-        previous_department = str(member.get("primaryDepartment") or "")
+        department = normalize_department_name(
+            account.department or profile.get("dept"), groups
+        )
+        previous_department = normalize_department_name(
+            str(member.get("primaryDepartment") or ""), groups
+        )
         major = str(profile.get("major") or "").strip()
         member.update(
             {
@@ -219,9 +224,11 @@ def get_organization(
         if account.id in linked_ids:
             continue
         profile = profiles.get(account.id, {})
-        department = account.department or ""
+        department = normalize_department_name(
+            account.department or profile.get("dept"), groups
+        )
         major = str(profile.get("major") or "").strip()
-        member_id = str(account.id)
+        member_id = member_id_map[account.id]
         member = {
             "id": member_id,
             "name": account.name,
@@ -232,14 +239,14 @@ def get_organization(
             if department == "NativeLab"
             else ["Native"],
             "primaryDepartment": department,
-            "departments": [major] if major else [],
+            "departments": [major] if major else ([department] if department else []),
             "major": major,
-            "role": major,
+            "role": major or department,
             "displaySubtitle": _member_subtitle(department, major),
             "majorLead": None,
             "isLeader": False,
             "isLead": False,
-            "isNew": False,
+            "isNew": True,
             "pmPoRoles": [],
             "projects": [],
         }
@@ -263,7 +270,7 @@ def get_organization(
 def _member_subtitle(department: str, major: str) -> str:
     if department in {"NativeLab", "NativeOps", "FA", "IT"}:
         return f"{department} · {major}" if major else department
-    return major
+    return major or department
 
 
 def _move_member_to_department_group(
@@ -275,8 +282,19 @@ def _move_member_to_department_group(
     department_group_names: set[str],
     previous_department: str = "",
 ) -> None:
+    normalized_dept = normalize_department_name(department, groups)
+    normalized_prev = normalize_department_name(previous_department, groups)
+    dept_key = normalized_dept.casefold()
+    prev_key = normalized_prev.casefold()
+    known_keys = {g.casefold() for g in department_group_names}
+
     target_group = next(
-        (item for item in groups if item.get("name") == department), None
+        (
+            item
+            for item in groups
+            if str(item.get("name") or "").strip().casefold() == dept_key
+        ),
+        None,
     )
     existing = next(
         (
@@ -287,11 +305,8 @@ def _move_member_to_department_group(
         None,
     )
     for group in groups:
-        if group.get("name") in {
-            *department_group_names,
-            department,
-            previous_department,
-        }:
+        group_name_key = str(group.get("name") or "").strip().casefold()
+        if group_name_key in {*known_keys, dept_key, prev_key}:
             group["members"] = [
                 member
                 for member in group.get("members", [])
@@ -302,14 +317,21 @@ def _move_member_to_department_group(
                 leader = group.get(leader_key)
                 if leader and str(leader.get("memberId")) == member_id:
                     group[leader_key] = None
-    if not department:
+    if not normalized_dept:
         return
-    group = next((item for item in groups if item.get("name") == department), None)
+    group = next(
+        (
+            item
+            for item in groups
+            if str(item.get("name") or "").strip().casefold() == dept_key
+        ),
+        None,
+    )
     if group is None:
         group = {
-            "id": f"department-{department.casefold().replace(' ', '-')}",
-            "name": department,
-            "description": department,
+            "id": f"department-{dept_key.replace(' ', '-')}",
+            "name": normalized_dept,
+            "description": normalized_dept,
             "leader": None,
             "lead": None,
             "members": [],
@@ -321,7 +343,7 @@ def _move_member_to_department_group(
             "memberId": member_id,
             "name": name,
             "avatarInitial": name[:1],
-            "role": major,
+            "role": major or normalized_dept,
             "isLeader": bool(existing and existing.get("isLeader")),
             "isLead": bool(existing and existing.get("isLead")),
         }
@@ -706,8 +728,6 @@ def toggle_post_like(
     else:
         save(db, "post_like", {"postId": post_id}, user)
         liked = True
-    from sqlalchemy import func
-
     count = (
         db.scalar(
             select(func.count())
@@ -754,8 +774,6 @@ def toggle_recommend(
     else:
         save(db, "proposal_recommend", {"proposalId": proposal_id}, user)
         recommended = True
-    from sqlalchemy import func
-
     count = (
         db.scalar(
             select(func.count())
