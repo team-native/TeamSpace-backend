@@ -80,31 +80,60 @@ def build_user_member_id_map(
     if directory_members is None:
         directory_members = load_organization().get("members", [])
     users = list(db.scalars(select(User).order_by(User.id)))
-    profiles = {
-        profile.owner_id: (profile.payload or {})
-        for profile in db.scalars(
-            select(Resource).where(Resource.resource_type == "profile")
-        )
-    }
+    profile_rows = list(
+        db.scalars(select(Resource).where(Resource.resource_type == "profile"))
+    )
+    profiles_by_owner = {row.owner_id: row for row in profile_rows}
 
     directory_ids = {str(m.get("id")) for m in directory_members}
     assigned: dict[int, str] = {}
     used_ids: set[str] = set(directory_ids)
+    dirty = False
 
+    # 1. 기존 organization.json 멤버와 명시적으로 연결된 계정 매핑
     for user in users:
         if is_admin_account(user):
             continue
-        explicit_id = str(profiles.get(user.id, {}).get("organizationMemberId") or "")
+        row = profiles_by_owner.get(user.id)
+        payload = (row.payload or {}) if row else {}
+        explicit_id = str(payload.get("organizationMemberId") or "")
         if explicit_id and explicit_id in directory_ids:
             assigned[user.id] = explicit_id
             used_ids.add(explicit_id)
 
+    # 2. 이미 영구 발급되어 저장된 generatedMemberId가 있는 경우 그대로 유지 (중간 삭제 시 번호 밀림 방지)
+    for user in users:
+        if is_admin_account(user) or user.id in assigned:
+            continue
+        row = profiles_by_owner.get(user.id)
+        payload = (row.payload or {}) if row else {}
+        saved_id = str(payload.get("generatedMemberId") or "")
+        if saved_id and saved_id not in used_ids:
+            assigned[user.id] = saved_id
+            used_ids.add(saved_id)
+
+    # 3. 처음 발급되는 신규 계정은 새 member-XX를 생성하고 profile에 영구 저장
     for user in users:
         if is_admin_account(user) or user.id in assigned:
             continue
         new_id = next_generated_member_id(directory_members, used_ids)
         assigned[user.id] = new_id
         used_ids.add(new_id)
+        row = profiles_by_owner.get(user.id)
+        if row:
+            row.payload = {**(row.payload or {}), "generatedMemberId": new_id}
+        else:
+            new_row = Resource(
+                resource_type="profile",
+                owner_id=user.id,
+                payload={"generatedMemberId": new_id},
+            )
+            db.add(new_row)
+            profiles_by_owner[user.id] = new_row
+        dirty = True
+
+    if dirty:
+        db.commit()
 
     return assigned
 
@@ -153,7 +182,11 @@ def _profile_member_id(db: Session, user_id: int) -> str | None:
             Resource.resource_type == "profile", Resource.owner_id == user_id
         )
     )
-    return profile.payload.get("organizationMemberId") if profile else None
+    if not profile or not profile.payload:
+        return None
+    return profile.payload.get("organizationMemberId") or profile.payload.get(
+        "generatedMemberId"
+    )
 
 
 def get_user_by_public_id(db: Session, public_id: str) -> User | None:
@@ -171,7 +204,9 @@ def get_user_by_public_id(db: Session, public_id: str) -> User | None:
 
 def get_public_user_id(db: Session, user: User) -> str:
     member_id = _profile_member_id(db, user.id)
-    if member_id and find_directory_member(member_id):
+    if member_id and (
+        find_directory_member(member_id) or MEMBER_ID_PATTERN.match(str(member_id))
+    ):
         return str(member_id)
     member_map = build_user_member_id_map(db)
     if user.id in member_map:

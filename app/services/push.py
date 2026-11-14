@@ -27,6 +27,7 @@ def send_push(
     preferences: dict | None = None,
 ) -> None:
     if not (settings.vapid_public_key and settings.vapid_private_key):
+        logger.info("Web Push skipped for user %s: VAPID keys not configured", user_id)
         return
     if preferences is None:
         settings_row = db.scalar(
@@ -38,6 +39,13 @@ def send_push(
         preferences = settings_row.payload if settings_row else {}
     kind = notification.get("sourceKind", notification.get("kind", ""))
     if not _push_allowed(preferences, kind):
+        logger.info(
+            "Web Push skipped for user %s (kind=%s, push=%s, dnd=%s)",
+            user_id,
+            kind,
+            preferences.get("push"),
+            _is_do_not_disturb(preferences),
+        )
         return
     subscriptions = list(
         db.scalars(
@@ -48,6 +56,7 @@ def send_push(
         )
     )
     if not subscriptions:
+        logger.info("Web Push skipped for user %s: no active subscriptions", user_id)
         return
     try:
         from pywebpush import WebPushException, webpush
@@ -64,13 +73,20 @@ def send_push(
                 vapid_private_key=settings.vapid_private_key,
                 vapid_claims={"sub": settings.vapid_subject},
             )
+            logger.info(
+                "Web Push delivered to user %s (subscription=%s, kind=%s)",
+                user_id,
+                subscription.id,
+                kind,
+            )
         except WebPushException as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             if status_code in {404, 410}:
                 db.delete(subscription)
                 db.commit()
             logger.warning(
-                "Web Push delivery failed for subscription %s (%s)",
+                "Web Push delivery failed for subscription %s (%s): %s",
                 subscription.id,
                 status_code,
+                exc,
             )

@@ -144,7 +144,9 @@ def organization_tree(
     db: Session = Depends(get_db), _: User = Depends(get_current_user)
 ):
     departments: dict[str, list] = {}
-    for user in db.scalars(select(User).order_by(User.name)):
+    for user in db.scalars(
+        select(User).where(User.active.is_(True)).order_by(User.name)
+    ):
         if is_admin_account(user):
             continue
         name = normalize_department_name(user.department) or "미지정"
@@ -167,6 +169,9 @@ def get_organization(
 ):
     organization = load_organization()
     members = organization.setdefault("members", [])
+    for existing_member in members:
+        existing_member["inOrganization"] = True
+
     groups = organization.setdefault("organizationChart", {}).setdefault("groups", [])
     users = [
         u
@@ -206,6 +211,7 @@ def get_organization(
                 "email": account.email,
                 "primaryDepartment": department or member.get("primaryDepartment", ""),
                 "displaySubtitle": _member_subtitle(department, major),
+                "inOrganization": True,
             }
         )
         if major:
@@ -247,6 +253,7 @@ def get_organization(
             "isLeader": False,
             "isLead": False,
             "isNew": True,
+            "inOrganization": False,
             "pmPoRoles": [],
             "projects": [],
         }

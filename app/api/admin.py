@@ -44,10 +44,13 @@ from app.services.email import send_email
 from app.services.events import normalize_event_payload
 from app.services.notice_schedule import _parse_publish_at, is_notice_visible
 from app.services.organization import (
+    build_user_member_id_map,
     find_directory_member,
     find_explicit_users_for_member,
     get_public_user_id,
     get_user_by_public_id,
+    is_admin_account,
+    normalize_department_name,
 )
 from app.services.security import hash_password
 
@@ -1195,10 +1198,11 @@ def approve_signup(
             400, "가입 요청에 비밀번호가 없으므로 초기 비밀번호가 필요합니다."
         )
 
+    normalized_dept = normalize_department_name(request.payload.get("dept"))
     member = User(
         email=email,
         name=request.payload["name"],
-        department=request.payload.get("dept"),
+        department=normalized_dept or None,
         password_hash=password_hash,
         roles=["Member"],
     )
@@ -1212,14 +1216,20 @@ def approve_signup(
                 payload={"organizationMemberId": member_id},
             )
         )
+        assigned_member_id = member_id
+    else:
+        db.commit()
+        db.refresh(member)
+        member_map = build_user_member_id_map(db)
+        assigned_member_id = member_map.get(member.id)
+
     request.payload = {
         **request.payload,
         "status": "APPROVED",
         "approvedBy": user.name,
         "userId": member.id,
+        "memberId": assigned_member_id,
     }
-    if member_id:
-        request.payload["memberId"] = member_id
     db.commit()
     notify_user(
         db,
@@ -1232,7 +1242,7 @@ def approve_signup(
     return envelope(
         {
             "userId": str(member.id),
-            "memberId": member_id,
+            "memberId": assigned_member_id,
             "status": "APPROVED",
         },
         "가입 요청을 승인했습니다.",
@@ -1265,6 +1275,78 @@ def reject_signup(
     return envelope(
         {"id": request_id, "status": "REJECTED"}, "가입 요청을 반려했습니다."
     )
+
+
+@router.get("/admin/users", summary="관리자 전체 계정 목록")
+def list_admin_users(
+    q: str | None = None,
+    active: bool | None = None,
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    require_admin(user)
+    users = list(db.scalars(select(User).order_by(User.id)))
+    profiles = {
+        profile.owner_id: (profile.payload or {})
+        for profile in db.scalars(
+            select(Resource).where(Resource.resource_type == "profile")
+        )
+    }
+    member_id_map = build_user_member_id_map(db)
+
+    items: list[dict[str, Any]] = []
+    for account in users:
+        if active is not None and account.active is not active:
+            continue
+        profile = profiles.get(account.id, {})
+        explicit_member_id = profile.get("organizationMemberId")
+        in_organization = bool(
+            explicit_member_id and find_directory_member(str(explicit_member_id))
+        )
+        public_id = (
+            str(account.id)
+            if is_admin_account(account)
+            else member_id_map.get(account.id, str(account.id))
+        )
+        dept = normalize_department_name(
+            account.department or profile.get("dept") or ""
+        )
+        entry = {
+            "id": public_id,
+            "userId": str(account.id),
+            "memberId": explicit_member_id or member_id_map.get(account.id),
+            "name": account.name,
+            "email": account.email,
+            "dept": dept,
+            "roles": account.roles or [],
+            "active": account.active,
+            "inOrganization": in_organization,
+            "isAdmin": is_admin_account(account),
+            "createdAt": iso(account.created_at),
+        }
+        if q:
+            needle = q.strip().casefold()
+            if not any(
+                needle in str(entry.get(field) or "").casefold()
+                for field in ("name", "email", "dept", "memberId")
+            ):
+                continue
+        items.append(entry)
+
+    if cursor:
+        cursor_index = next(
+            (idx for idx, item in enumerate(items) if item["userId"] == cursor),
+            None,
+        )
+        if cursor_index is None:
+            raise HTTPException(400, "cursor 값이 올바르지 않습니다.")
+        items = items[cursor_index + 1 :]
+
+    page = items[:limit]
+    next_cursor = page[-1]["userId"] if len(items) > limit and page else None
+    return envelope({"items": page, "nextCursor": next_cursor})
 
 
 @router.patch("/admin/users/{user_id}/roles", summary="사용자 역할 변경")
@@ -1313,7 +1395,7 @@ def patch_admin_user(
         dept = changes["dept"]
         if dept is not None and not dept.strip():
             raise HTTPException(422, "부서명은 비워둘 수 없습니다.")
-        target.department = dept.strip() if dept else None
+        target.department = normalize_department_name(dept) if dept else None
         profile_data["dept"] = target.department or ""
     if "member_id" in changes:
         member_id = changes["member_id"]
@@ -1382,7 +1464,7 @@ def create_admin_user(
     member = User(
         email=email,
         name=payload.name.strip(),
-        department=payload.dept,
+        department=normalize_department_name(payload.dept) or None,
         password_hash=hash_password(temporary_password),
         roles=roles,
     )

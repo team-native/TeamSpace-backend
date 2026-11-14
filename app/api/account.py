@@ -169,9 +169,10 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
     org_data = load_organization()
     directory = org_data.get("members", [])
     groups = org_data.get("organizationChart", {}).get("groups", [])
+    # 활성 상태이면서 Admin이 아닌 계정만 조회 (비활성화/삭제된 계정은 목록에서 제외)
     users = [
         u
-        for u in db.scalars(select(User).order_by(User.id))
+        for u in db.scalars(select(User).where(User.active.is_(True)).order_by(User.id))
         if not is_admin_account(u)
     ]
     profiles = {
@@ -254,6 +255,7 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
                     "roles": ["Member"],
                     "active": True,
                     "linked": False,
+                    "inOrganization": True,
                     "userId": None,
                 }
             )
@@ -263,6 +265,7 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
         item["id"] = member["id"]
         item["href"] = f"/inhouse/people/{member['id']}"
         item["linked"] = True
+        item["inOrganization"] = True
         item["userId"] = str(person.id)
         raw_department = normalize_department_name(
             person.department
@@ -313,6 +316,7 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
             item["major"] = major
             item["displaySubtitle"] = _people_subtitle(raw_department, major)
             item["linked"] = True
+            item["inOrganization"] = False
             item["userId"] = str(person.id)
             items.append(item)
     return items
@@ -329,13 +333,11 @@ def get_person(
     person_id: str, db: Session = Depends(get_db), _: User = Depends(get_current_user)
 ):
     people = _people_items(db)
-    item = next(
-        (person for person in people if person["id"] == person_id), None
-    )
+    item = next((person for person in people if person["id"] == person_id), None)
     if item:
         return envelope(item)
     person = get_user_by_public_id(db, person_id)
-    if person is None or is_admin_account(person):
+    if person is None or is_admin_account(person) or not person.active:
         raise HTTPException(404, "팀원을 찾을 수 없습니다.")
     mapped = next(
         (entry for entry in people if entry.get("userId") == str(person.id)),
@@ -552,22 +554,30 @@ def get_notification_settings(
             Resource.owner_id == user.id,
         )
     )
-    defaults = {
+    default_kinds = {
+        "내 업무": True,
+        "재정": True,
+        "일정": True,
+        "공지": True,
+        "규칙 (제도 변경)": True,
+        "게시판": False,
+    }
+    defaults: dict[str, Any] = {
         "push": False,
-        "kinds": {
-            "내 업무": True,
-            "재정": True,
-            "일정": True,
-            "공지": True,
-            "규칙 (제도 변경)": True,
-            "게시판": False,
-        },
+        "kinds": default_kinds,
         "dnd": True,
         "dndFrom": "23:00",
         "dndTo": "08:00",
         "dndDays": ["월", "화", "수", "목", "금", "토", "일"],
     }
-    return envelope(record.payload if record else defaults)
+    if not record or not record.payload:
+        return envelope(defaults)
+    merged = {**defaults, **record.payload}
+    merged["push"] = bool(merged.get("push", False))
+    merged["kinds"] = {**default_kinds, **(record.payload.get("kinds") or {})}
+    if merged.get("dndDays") is None:
+        merged["dndDays"] = defaults["dndDays"]
+    return envelope(merged)
 
 
 @router.patch("/me/notification-settings", summary="알림 설정 수정")
