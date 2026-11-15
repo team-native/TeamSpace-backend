@@ -642,6 +642,26 @@ def patch_notice(
     return envelope({"id": notice_id, **updated.payload}, "공지를 수정했습니다.")
 
 
+@router.delete("/admin/notices/{notice_id}", summary="공지 삭제")
+def delete_notice(
+    notice_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    require_admin(user)
+    notice = get_record(db, "notice", notice_id)
+    for confirmation in db.scalars(
+        select(Resource).where(
+            Resource.resource_type == "notice_confirmation",
+            Resource.payload["noticeId"].as_string() == str(notice.id),
+        )
+    ):
+        db.delete(confirmation)
+    db.delete(notice)
+    db.commit()
+    return envelope({"id": notice_id, "deleted": True}, "공지를 삭제했습니다.")
+
+
 @router.get("/admin/notices/{notice_id}/unconfirmed", summary="공지 미확인자")
 def unconfirmed_notice(
     notice_id: str,
@@ -744,6 +764,26 @@ def patch_event(
             "/inhouse/my/calendar",
         )
     return envelope({"id": event_id, **updated.payload}, "일정을 수정했습니다.")
+
+
+@router.delete("/admin/events/{event_id}", summary="일정 삭제")
+def delete_event(
+    event_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    require_admin(user)
+    event = get_record(db, "event", event_id)
+    for reminder in db.scalars(
+        select(Resource).where(
+            Resource.resource_type == "event_reminder",
+            Resource.payload["eventId"].as_string() == str(event.id),
+        )
+    ):
+        db.delete(reminder)
+    db.delete(event)
+    db.commit()
+    return envelope({"id": event_id, "deleted": True}, "일정을 삭제했습니다.")
 
 
 @router.post("/admin/docs", status_code=201, summary="문서 등록 또는 개정")

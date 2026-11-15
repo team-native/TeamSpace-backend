@@ -30,7 +30,7 @@ from app.services.anonymity import (
 )
 from app.services.content_views import count_content_view
 from app.services.notice_schedule import is_notice_visible
-from app.services.organization import validate_department_name
+from app.services.organization import is_admin_account, validate_department_name
 
 router = APIRouter()
 REPORT_REASONS = {"욕설·비하", "개인정보 노출", "도배·광고", "사실과 다른 내용", "기타"}
@@ -195,6 +195,7 @@ def _comment_view(
         "anonymous": bool(data.get("anonymous")),
         "text": data.get("text", ""),
         "createdAt": iso(record.created_at),
+        "updatedAt": data.get("updatedAt"),
         "when": iso(record.created_at),
         "likes": int(data.get("likes", 0)),
         "liked": liked,
@@ -467,6 +468,14 @@ class ProposalCreate(BaseModel):
     anonymous: bool = False
 
 
+class ProposalPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    body: str | None = Field(default=None, max_length=10000)
+    content: str | None = Field(default=None, max_length=10000)
+    category: str | None = Field(default=None, min_length=1, max_length=80)
+    dept: str | None = Field(default=None, max_length=100)
+
+
 def _proposal_comments(db: Session, proposal_id: int) -> list[Resource]:
     return list(
         db.scalars(
@@ -532,6 +541,7 @@ def _proposal_view(
         "recommendCount": likes,
         "commentCount": comments_total,
         "createdAt": iso(proposal.created_at),
+        "updatedAt": data.get("updatedAt"),
         "mine": is_record_owner(proposal, user),
         "answer": data.get("answer"),
         "history": data.get("history", []),
@@ -821,6 +831,54 @@ def create_proposal(
     )
 
 
+@router.patch("/proposals/{proposal_id}", summary="운영 제안 수정")
+def patch_user_proposal(
+    proposal_id: str,
+    payload: ProposalPatch,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    proposal = get_record(db, "proposal", proposal_id)
+    if not is_record_owner(proposal, user):
+        raise HTTPException(403, "작성자 본인만 운영 제안을 수정할 수 있습니다.")
+    if proposal.payload.get("status", "접수") != "접수":
+        raise HTTPException(409, "접수 상태인 운영 제안만 수정할 수 있습니다.")
+    changes = payload.model_dump(exclude_unset=True)
+    data = dict(proposal.payload)
+    if "title" in changes:
+        if changes["title"] is None or not changes["title"].strip():
+            raise HTTPException(422, "제안 제목을 입력해주세요.")
+        data["title"] = changes["title"].strip()
+    if "body" in changes or "content" in changes:
+        raw_body = (
+            changes.get("body") if "body" in changes else changes.get("content")
+        )
+        body = (raw_body or "").strip()
+        if not body:
+            raise HTTPException(422, "제안 내용을 입력해주세요.")
+        data["body"] = body
+        data["content"] = body
+    if "category" in changes:
+        if changes["category"] is None or not changes["category"].strip():
+            raise HTTPException(422, "카테고리를 입력해주세요.")
+        data["category"] = changes["category"].strip()
+    if "dept" in changes:
+        dept_val = changes["dept"]
+        data["dept"] = (
+            validate_department_name(dept_val)
+            if dept_val and dept_val.strip()
+            else None
+        )
+    data["updatedAt"] = iso(datetime.now(timezone.utc))
+    proposal.payload = data
+    db.commit()
+    db.refresh(proposal)
+    return envelope(
+        _proposal_view(proposal, db, user, detail=True),
+        "운영 제안을 수정했습니다.",
+    )
+
+
 @router.delete("/proposals/{proposal_id}", summary="운영 제안 삭제")
 def delete_proposal(
     proposal_id: str,
@@ -828,8 +886,7 @@ def delete_proposal(
     user: User = Depends(get_current_user),
 ):
     proposal = get_record(db, "proposal", proposal_id)
-    is_admin = "admin" in {str(role).strip().casefold() for role in (user.roles or [])}
-    if not is_record_owner(proposal, user) and not is_admin:
+    if not is_record_owner(proposal, user) and not is_admin_account(user):
         raise HTTPException(403, "작성자 또는 관리자만 삭제할 수 있습니다.")
     for related in db.scalars(
         select(Resource).where(
@@ -1087,7 +1144,7 @@ def delete_post(
     post_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ):
     post = get_record(db, "post", post_id)
-    if not is_record_owner(post, user) and "Admin" not in (user.roles or []):
+    if not is_record_owner(post, user) and not is_admin_account(user):
         raise HTTPException(403, "작성자 또는 관리자만 삭제할 수 있습니다.")
     post.payload = {**post.payload, "status": "deleted"}
     db.commit()
@@ -1184,6 +1241,70 @@ def create_comment(
         item for item in post_view["comments"] if item["id"] == str(record.id)
     )
     return envelope(created_comment, "댓글을 등록했습니다.", 201)
+
+
+@router.patch(
+    "/posts/{post_id}/comments/{comment_id}", summary="게시글 댓글 수정"
+)
+def patch_comment(
+    post_id: str,
+    comment_id: str,
+    payload: dict[str, Any],
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    post = get_record(db, "post", post_id)
+    if post.payload.get("status", "published") != "published":
+        raise HTTPException(404, "게시글을 찾을 수 없습니다.")
+    comment = get_record(db, "comment", comment_id)
+    if str(comment.payload.get("postId")) != post_id:
+        raise HTTPException(404, "댓글을 찾을 수 없습니다.")
+    if not is_record_owner(comment, user) and not is_admin_account(user):
+        raise HTTPException(403, "댓글 작성자 또는 관리자만 수정할 수 있습니다.")
+    text = str(payload.get("text", payload.get("content", ""))).strip()
+    if not text:
+        raise HTTPException(422, "댓글 내용을 입력해주세요.")
+    comment.payload = {
+        **comment.payload,
+        "text": text,
+        "updatedAt": iso(datetime.now(timezone.utc)),
+    }
+    db.commit()
+    post = get_record(db, "post", post_id)
+    post_view = _post_view(post, db, user, detail=True)
+    updated_comment = next(
+        item for item in post_view["comments"] if item["id"] == str(comment.id)
+    )
+    return envelope(updated_comment, "댓글을 수정했습니다.")
+
+
+@router.delete(
+    "/posts/{post_id}/comments/{comment_id}", summary="게시글 댓글 삭제"
+)
+def delete_comment(
+    post_id: str,
+    comment_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    post = get_record(db, "post", post_id)
+    if post.payload.get("status", "published") != "published":
+        raise HTTPException(404, "게시글을 찾을 수 없습니다.")
+    comment = get_record(db, "comment", comment_id)
+    if str(comment.payload.get("postId")) != post_id:
+        raise HTTPException(404, "댓글을 찾을 수 없습니다.")
+    if not is_record_owner(comment, user) and not is_admin_account(user):
+        raise HTTPException(403, "댓글 작성자 또는 관리자만 삭제할 수 있습니다.")
+    for reaction in db.scalars(
+        select(Resource).where(
+            Resource.resource_type == "comment_like",
+            Resource.payload["commentId"].as_string() == str(comment.id),
+        )
+    ):
+        db.delete(reaction)
+    db.delete(comment)
+    db.commit()
+    return envelope({"id": comment_id, "deleted": True}, "댓글을 삭제했습니다.")
 
 
 @router.post("/posts/{post_id}/comments/{comment_id}/like", summary="댓글 공감")
@@ -1334,7 +1455,7 @@ def inquiry_comment(
     record = get_record(db, "inquiry", inquiry_id)
     is_owner = is_record_owner(record, user)
     if (
-        "Admin" not in (user.roles or [])
+        not is_admin_account(user)
         and (not user.department or user.department != record.payload.get("dept"))
         and not is_owner
     ):
