@@ -13,6 +13,38 @@ from app.models.user import User
 ORGANIZATION_PATH = Path(__file__).resolve().parents[1] / "data" / "organization.json"
 MEMBER_ID_PATTERN = re.compile(r"^member-(\d+)$")
 
+OFFICIAL_DEPARTMENTS: tuple[str, ...] = (
+    "NativeOps",
+    "FA",
+    "NativeLab",
+    "IT",
+    "iOS",
+    "Android",
+    "Flutter",
+    "Frontend",
+    "Backend",
+    "DevOps",
+    "Design & Client",
+)
+
+DEPARTMENT_ALIASES: dict[str, str] = {
+    "nativeops": "NativeOps",
+    "native ops": "NativeOps",
+    "fa": "FA",
+    "nativelab": "NativeLab",
+    "native lab": "NativeLab",
+    "it": "IT",
+    "ios": "iOS",
+    "android": "Android",
+    "flutter": "Flutter",
+    "frontend": "Frontend",
+    "backend": "Backend",
+    "devops": "DevOps",
+    "design & client": "Design & Client",
+    "design&client": "Design & Client",
+    "design": "Design & Client",
+}
+
 
 def load_organization() -> dict[str, Any]:
     with ORGANIZATION_PATH.open(encoding="utf-8") as organization_file:
@@ -31,6 +63,12 @@ def normalize_department_name(
     raw = str(department or "").strip()
     if not raw:
         return ""
+    alias_hit = DEPARTMENT_ALIASES.get(raw.casefold())
+    if alias_hit:
+        return alias_hit
+    for canonical in OFFICIAL_DEPARTMENTS:
+        if canonical.casefold() == raw.casefold():
+            return canonical
     group_list = (
         groups
         if groups is not None
@@ -39,23 +77,27 @@ def normalize_department_name(
     for group in group_list:
         group_name = str(group.get("name") or "").strip()
         if group_name and group_name.casefold() == raw.casefold():
-            return group_name
-    for canonical in (
-        "NativeOps",
-        "FA",
-        "NativeLab",
-        "IT",
-        "iOS",
-        "Android",
-        "Flutter",
-        "Frontend",
-        "Backend",
-        "DevOps",
-        "Design & Client",
-    ):
-        if canonical.casefold() == raw.casefold():
-            return canonical
+            return DEPARTMENT_ALIASES.get(group_name.casefold(), group_name)
     return raw
+
+
+def validate_department_name(
+    department: str | None, *, allow_empty: bool = False
+) -> str:
+    normalized = normalize_department_name(department)
+    if not normalized:
+        if allow_empty:
+            return ""
+        raise HTTPException(
+            422,
+            f"부서를 입력해주세요. 허용 부서: {', '.join(OFFICIAL_DEPARTMENTS)}",
+        )
+    if normalized not in OFFICIAL_DEPARTMENTS:
+        raise HTTPException(
+            422,
+            f"공식 부서 목록에 없는 부서입니다. 허용 부서: {', '.join(OFFICIAL_DEPARTMENTS)}",
+        )
+    return normalized
 
 
 def next_generated_member_id(

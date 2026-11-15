@@ -44,6 +44,7 @@ from app.services.email import send_email
 from app.services.events import normalize_event_payload
 from app.services.notice_schedule import _parse_publish_at, is_notice_visible
 from app.services.organization import (
+    DEPARTMENT_ALIASES,
     build_user_member_id_map,
     find_directory_member,
     find_explicit_users_for_member,
@@ -51,6 +52,7 @@ from app.services.organization import (
     get_user_by_public_id,
     is_admin_account,
     normalize_department_name,
+    validate_department_name,
 )
 from app.services.security import hash_password
 
@@ -91,6 +93,37 @@ class AdminUserCreate(BaseModel):
     roles: list[str] = Field(min_length=1, max_length=1)
 
 
+def _is_admin(user: User) -> bool:
+    return "admin" in {str(role).strip().casefold() for role in (user.roles or [])}
+
+
+def _user_departments(db: Session, user: User) -> set[str]:
+    departments: set[str] = set()
+    direct = normalize_department_name(user.department)
+    if direct:
+        departments.add(direct)
+    profile = db.scalar(
+        select(Resource).where(
+            Resource.resource_type == "profile", Resource.owner_id == user.id
+        )
+    )
+    if profile and profile.payload:
+        profile_dept = normalize_department_name(profile.payload.get("dept"))
+        if profile_dept:
+            departments.add(profile_dept)
+    return departments
+
+
+def _department_query_values(canonical_dept: str) -> set[str]:
+    values = {canonical_dept}
+    for alias, target in DEPARTMENT_ALIASES.items():
+        if target == canonical_dept:
+            values.add(alias)
+            values.add(alias.upper())
+            values.add(alias.title())
+    return values
+
+
 def _send_signup_approved_email(email: str, name: str) -> None:
     try:
         send_email(
@@ -127,6 +160,7 @@ def _upload_reference_ids(value: Any) -> set[str]:
 def _can_download_upload(db: Session, upload: Resource, user: User) -> bool:
     if is_record_owner(upload, user):
         return True
+    user_depts = _user_departments(db, user)
     for record in db.scalars(
         select(Resource).where(
             Resource.resource_type.in_(
@@ -172,10 +206,11 @@ def _can_download_upload(db: Session, upload: Resource, user: User) -> bool:
         elif record.resource_type == "event":
             return True
         elif record.resource_type == "inquiry":
+            target_dept = normalize_department_name(data.get("dept"))
             if (
                 is_record_owner(record, user)
-                or "Admin" in (user.roles or [])
-                or user.department == data.get("dept")
+                or _is_admin(user)
+                or (target_dept and target_dept in user_depts)
             ):
                 return True
         elif record.resource_type == "finance_contract" and user_can_finance(user):
@@ -184,7 +219,7 @@ def _can_download_upload(db: Session, upload: Resource, user: User) -> bool:
 
 
 def require_admin(user: User) -> None:
-    if "admin" not in {str(role).strip().casefold() for role in user.roles or []}:
+    if not _is_admin(user):
         raise HTTPException(403, "관리자 권한이 필요합니다.")
 
 
@@ -219,11 +254,20 @@ def _notice_author_role(user: User) -> str:
     )
 
 
-def require_inquiry_access(user: User, inquiry: Resource) -> None:
-    if "Admin" not in (user.roles or []) and (
-        not user.department or user.department != inquiry.payload.get("dept")
-    ):
+def require_inquiry_access(db: Session, user: User, inquiry: Resource) -> None:
+    if _is_admin(user):
+        return
+    target_dept = normalize_department_name(inquiry.payload.get("dept"))
+    if not target_dept or target_dept not in _user_departments(db, user):
         raise HTTPException(403, "해당 부서 문의를 처리할 권한이 없습니다.")
+
+
+def require_proposal_access(db: Session, user: User, proposal: Resource) -> None:
+    if _is_admin(user):
+        return
+    target_dept = normalize_department_name(proposal.payload.get("dept"))
+    if not target_dept or target_dept not in _user_departments(db, user):
+        raise HTTPException(403, "제안을 처리할 담당 부서 권한이 없습니다.")
 
 
 def _announce_all_users(
@@ -820,12 +864,16 @@ def admin_inquiries(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    is_admin = "Admin" in (user.roles or [])
-    if not is_admin and not user.department:
+    is_admin = _is_admin(user)
+    user_depts = _user_departments(db, user)
+    if not is_admin and not user_depts:
         raise HTTPException(403, "관리자 또는 담당 부서 권한이 필요합니다.")
     stmt = select(Resource).where(Resource.resource_type == "inquiry")
     if not is_admin:
-        stmt = stmt.where(Resource.payload["dept"].as_string() == user.department)
+        allowed_dept_values = set().union(
+            *(_department_query_values(dept) for dept in user_depts)
+        )
+        stmt = stmt.where(Resource.payload["dept"].as_string().in_(allowed_dept_values))
     if status:
         stmt = stmt.where(Resource.payload["status"].as_string() == status)
     if cursor:
@@ -854,7 +902,7 @@ def answer_inquiry(
     user: User = Depends(get_current_user),
 ):
     inquiry = get_record(db, "inquiry", inquiry_id)
-    require_inquiry_access(user, inquiry)
+    require_inquiry_access(db, user, inquiry)
     text = payload.get("text", "").strip()
     if not text:
         raise HTTPException(400, "답변을 입력해주세요.")
@@ -899,7 +947,7 @@ def patch_inquiry(
     user: User = Depends(get_current_user),
 ):
     inquiry = get_record(db, "inquiry", inquiry_id)
-    require_inquiry_access(user, inquiry)
+    require_inquiry_access(db, user, inquiry)
     state = payload.get("status")
     if state not in {"접수", "검토 중", "답변 완료", "해결됨"}:
         raise HTTPException(422, "문의 상태가 올바르지 않습니다.")
@@ -989,12 +1037,17 @@ def admin_proposals(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if "Admin" not in (user.roles or []) and not user.department:
+    is_admin = _is_admin(user)
+    user_depts = _user_departments(db, user)
+    if not is_admin and not user_depts:
         raise HTTPException(403, "관리자 또는 담당 부서 권한이 필요합니다.")
     stmt = select(Resource).where(Resource.resource_type == "proposal")
-    if "Admin" not in (user.roles or []):
-        stmt = stmt.where(Resource.payload["dept"].as_string() == user.department)
-    if status:
+    if not is_admin:
+        allowed_dept_values = set().union(
+            *(_department_query_values(dept) for dept in user_depts)
+        )
+        stmt = stmt.where(Resource.payload["dept"].as_string().in_(allowed_dept_values))
+    if status and status not in {"전체", "all"}:
         status_expr = func.coalesce(Resource.payload["status"].as_string(), "접수")
         stmt = stmt.where(status_expr == status)
     if cursor:
@@ -1025,10 +1078,7 @@ def patch_proposal(
     user: User = Depends(get_current_user),
 ):
     proposal = get_record(db, "proposal", proposal_id)
-    if "Admin" not in (user.roles or []) and (
-        not user.department or user.department != proposal.payload.get("dept")
-    ):
-        raise HTTPException(403, "제안을 처리할 담당 부서 권한이 없습니다.")
+    require_proposal_access(db, user, proposal)
     allowed_states = {"접수", "검토 중", "협업 중", "답변 완료", "반려"}
     status = payload.get("status", proposal.payload.get("status", "접수"))
     if status not in allowed_states:
@@ -1046,9 +1096,11 @@ def patch_proposal(
         )
     data["history"] = history
     answer_text = payload.get("answer", payload.get("text"))
+    answer_added = False
     if answer_text is not None:
         if not str(answer_text).strip():
             raise HTTPException(422, "공식 답변을 입력해주세요.")
+        answer_added = True
         data["answer"] = {
             "who": user.name,
             "at": iso(datetime.now().astimezone()),
@@ -1070,13 +1122,27 @@ def patch_proposal(
         else resolve_anonymous_owner(db, proposal.payload.get("anonymousOwnerKey"))
     )
     if recipient:
-        notify_user(
-            db,
-            recipient.id,
-            "공지",
-            f"운영 제안 상태가 변경됐어요: {data.get('title', '')}",
-            f"/inhouse/community/proposals/{proposal_id}",
-        )
+        proposal_title = data.get("title", "운영 제안")
+        if answer_added:
+            notify_user(
+                db,
+                recipient.id,
+                "내 업무",
+                "운영 제안에 공식 답변이 등록됐어요.",
+                f"/inhouse/community/proposals/{proposal_id}",
+                message=f"{proposal_title} · {data['answer']['text']}",
+                notification_type="PROPOSAL_ANSWER",
+            )
+        else:
+            notify_user(
+                db,
+                recipient.id,
+                "내 업무",
+                f"운영 제안 상태가 변경됐어요: {data['status']}",
+                f"/inhouse/community/proposals/{proposal_id}",
+                message=proposal_title,
+                notification_type="PROPOSAL",
+            )
     return envelope(
         {"id": proposal_id, "status": data["status"], "answer": data.get("answer")},
         "운영 제안을 갱신했습니다.",
@@ -1124,6 +1190,8 @@ def change_finance_permission(
     if payload.get("canViewFinance"):
         if not set(roles).intersection({"Leader", "Admin"}):
             roles = ["FA"]
+        else:
+            roles = roles[:1]
     else:
         roles = [role for role in roles if role != "FA"]
         if not roles:
@@ -1198,7 +1266,7 @@ def approve_signup(
             400, "가입 요청에 비밀번호가 없으므로 초기 비밀번호가 필요합니다."
         )
 
-    normalized_dept = normalize_department_name(request.payload.get("dept"))
+    normalized_dept = validate_department_name(request.payload.get("dept"))
     member = User(
         email=email,
         name=request.payload["name"],
@@ -1393,9 +1461,12 @@ def patch_admin_user(
     profile_data = {}
     if "dept" in changes:
         dept = changes["dept"]
-        if dept is not None and not dept.strip():
-            raise HTTPException(422, "부서명은 비워둘 수 없습니다.")
-        target.department = normalize_department_name(dept) if dept else None
+        if dept is not None:
+            if not dept.strip():
+                raise HTTPException(422, "부서명은 비워둘 수 없습니다.")
+            target.department = validate_department_name(dept)
+        else:
+            target.department = None
         profile_data["dept"] = target.department or ""
     if "member_id" in changes:
         member_id = changes["member_id"]
@@ -1460,11 +1531,16 @@ def create_admin_user(
     if db.scalar(select(User.id).where(func.lower(User.email) == email)):
         raise HTTPException(409, "이미 등록된 이메일입니다.")
     roles = _validated_single_role(payload.roles)
+    normalized_dept = (
+        validate_department_name(payload.dept)
+        if payload.dept and payload.dept.strip()
+        else None
+    )
     temporary_password = secrets.token_urlsafe(18)
     member = User(
         email=email,
         name=payload.name.strip(),
-        department=normalize_department_name(payload.dept) or None,
+        department=normalized_dept,
         password_hash=hash_password(temporary_password),
         roles=roles,
     )

@@ -234,6 +234,7 @@ def classify_notification_type(
         "INQUIRY_ANSWERED": "INQUIRY_ANSWER",
         "APPROVAL_REQUEST": "APPROVAL",
         "DOCUMENT_REVISION": "RULE",
+        "PROPOSAL_ANSWERED": "PROPOSAL_ANSWER",
     }
     if notification_type:
         value = aliases.get(notification_type.upper(), notification_type.upper())
@@ -241,6 +242,8 @@ def classify_notification_type(
             return value
     path = href.casefold()
     title_text = title.casefold()
+    if "/proposals/" in path or "제안" in title_text:
+        return "PROPOSAL_ANSWER" if "답변" in title_text else "PROPOSAL"
     if "inquir" in path or "문의" in title_text:
         return "INQUIRY_ANSWER" if "답변" in title_text else "INQUIRY"
     if any(segment in path for segment in ("/docs", "/documents", "/rules")):
@@ -274,13 +277,21 @@ def notification_response(record: Resource) -> dict[str, Any]:
     inferred_kind = (
         "내 업무"
         if legacy_type
-        in {"APPROVAL", "APPROVAL_REQUEST", "INQUIRY_ANSWER", "INQUIRY_ANSWERED"}
+        in {
+            "APPROVAL",
+            "APPROVAL_REQUEST",
+            "INQUIRY_ANSWER",
+            "INQUIRY_ANSWERED",
+            "PROPOSAL",
+            "PROPOSAL_ANSWER",
+            "PROPOSAL_ANSWERED",
+        }
         else "공지"
     )
     data.setdefault(
         "kind",
         source_kind
-        if source_kind in {"내 업무", "재정", "일정", "공지"}
+        if source_kind in {"내 업무", "재정", "일정", "공지", "규칙 (제도 변경)"}
         else inferred_kind,
     )
     data.setdefault("sourceKind", source_kind or data["kind"])

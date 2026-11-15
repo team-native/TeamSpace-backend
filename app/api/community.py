@@ -13,6 +13,7 @@ from app.api.shared import (
     envelope,
     get_record,
     iso,
+    notify_user,
 )
 from app.core.config import settings
 from app.db.session import get_db
@@ -29,9 +30,11 @@ from app.services.anonymity import (
 )
 from app.services.content_views import count_content_view
 from app.services.notice_schedule import is_notice_visible
+from app.services.organization import validate_department_name
 
 router = APIRouter()
 REPORT_REASONS = {"욕설·비하", "개인정보 노출", "도배·광고", "사실과 다른 내용", "기타"}
+PROPOSAL_STATUSES = ("접수", "검토 중", "협업 중", "답변 완료", "반려")
 
 
 def _post_view(
@@ -224,8 +227,10 @@ def get_posts(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if sort not in {"latest", "likes", "comments"}:
-        raise HTTPException(400, "sort는 latest, likes, comments 중 하나여야 합니다.")
+    if sort not in {"latest", "likes", "comments", "views"}:
+        raise HTTPException(
+            400, "sort는 latest, likes, comments, views 중 하나여야 합니다."
+        )
     if status not in {"published", "draft"}:
         raise HTTPException(400, "status는 published 또는 draft여야 합니다.")
     if status == "draft" and not mine:
@@ -289,6 +294,10 @@ def get_posts(
         score_expr = cast(
             func.coalesce(Resource.payload["likes"].as_string(), "0"), Integer
         )
+    elif sort == "views":
+        score_expr = cast(
+            func.coalesce(Resource.payload["views"].as_string(), "0"), Integer
+        )
     else:
         comment_resource = aliased(Resource)
         score_expr = (
@@ -326,6 +335,8 @@ def get_posts(
                 cursor_score = cursor_record.created_at
             elif sort == "likes":
                 cursor_score = int(cursor_record.payload.get("likes", 0) or 0)
+            elif sort == "views":
+                cursor_score = int(cursor_record.payload.get("views", 0) or 0)
             else:
                 cursor_score = (
                     db.scalar(
@@ -512,6 +523,7 @@ def _proposal_view(
     result = {
         "id": str(proposal.id),
         "category": data.get("category", data.get("dept", "업무환경")),
+        "dept": data.get("dept", ""),
         "title": data.get("title", ""),
         "body": data.get("body", data.get("content", "")),
         "status": data.get("status", "접수"),
@@ -529,7 +541,7 @@ def _proposal_view(
         result["author"] = author_name or (
             author.name if author else data.get("author", "알 수 없음")
         )
-        result["dept"] = author.department if author else data.get("dept", "")
+        result["dept"] = data.get("dept") or (author.department if author else "")
     if detail:
         reaction = db.scalar(
             select(Resource.id).where(
@@ -660,7 +672,12 @@ def get_proposals(
             )
             == category
         )
-    if status:
+    if status and status not in {"전체", "all"}:
+        if status not in PROPOSAL_STATUSES:
+            raise HTTPException(
+                422,
+                "status는 접수, 검토 중, 협업 중, 답변 완료, 반려 중 하나여야 합니다.",
+            )
         filters.append(
             func.coalesce(Resource.payload["status"].as_string(), "접수") == status
         )
@@ -771,12 +788,17 @@ def create_proposal(
     body = (payload.body or payload.content or "").strip()
     if not body:
         raise HTTPException(422, "제안 내용을 입력해주세요.")
+    normalized_dept = (
+        validate_department_name(payload.dept)
+        if payload.dept and payload.dept.strip()
+        else None
+    )
     data = {
         "title": payload.title.strip(),
         "body": body,
         "content": body,
         "category": payload.category,
-        "dept": payload.dept,
+        "dept": normalized_dept,
         "status": "접수",
         "anonymous": payload.anonymous,
         "recommendCount": 0,
@@ -797,6 +819,28 @@ def create_proposal(
     return envelope(
         {"id": str(record.id), "status": "접수"}, "제안을 등록했습니다.", 201
     )
+
+
+@router.delete("/proposals/{proposal_id}", summary="운영 제안 삭제")
+def delete_proposal(
+    proposal_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    proposal = get_record(db, "proposal", proposal_id)
+    is_admin = "admin" in {str(role).strip().casefold() for role in (user.roles or [])}
+    if not is_record_owner(proposal, user) and not is_admin:
+        raise HTTPException(403, "작성자 또는 관리자만 삭제할 수 있습니다.")
+    for related in db.scalars(
+        select(Resource).where(
+            Resource.resource_type.in_({"proposal_recommend", "proposal_comment"}),
+            Resource.payload["proposalId"].as_string() == str(proposal.id),
+        )
+    ):
+        db.delete(related)
+    db.delete(proposal)
+    db.commit()
+    return envelope({"id": proposal_id, "deleted": True}, "운영 제안을 삭제했습니다.")
 
 
 @router.post("/proposals/{proposal_id}/recommend", summary="운영 제안 추천 토글")
@@ -862,18 +906,34 @@ def comment_on_proposal(
     text = str(payload.get("text", payload.get("content", ""))).strip()
     if not text:
         raise HTTPException(422, "댓글 내용을 입력해주세요.")
+    is_proposal_author = is_record_owner(proposal, user)
     anonymous = bool(payload.get("anonymous", False))
     data = {
         "proposalId": proposal_id,
         "text": text,
         "anonymous": anonymous,
-        "isProposalAuthor": is_record_owner(proposal, user),
+        "isProposalAuthor": is_proposal_author,
     }
     if anonymous:
         data = anonymize_payload(data, user)
     else:
         data["author"] = user.name
     record = create_record(db, "proposal_comment", data, None if anonymous else user)
+    recipient = (
+        db.get(User, proposal.owner_id)
+        if proposal.owner_id
+        else resolve_anonymous_owner(db, proposal.payload.get("anonymousOwnerKey"))
+    )
+    if recipient is not None and not is_proposal_author:
+        notify_user(
+            db,
+            recipient.id,
+            "내 업무",
+            "운영 제안에 새 댓글이 등록됐어요.",
+            f"/inhouse/community/proposals/{proposal_id}",
+            message=f"{proposal.payload.get('title', '운영 제안')} · {text}",
+            notification_type="PROPOSAL",
+        )
     proposal = get_record(db, "proposal", proposal_id)
     proposal_view = _proposal_view(proposal, db, user, detail=True)
     created_comment = next(
@@ -1111,7 +1171,6 @@ def create_comment(
         else resolve_anonymous_owner(db, post.payload.get("anonymousOwnerKey"))
     )
     if post_author is not None and not is_post_author:
-        notify_user = __import__("app.api.shared", fromlist=["notify_user"]).notify_user
         notify_user(
             db,
             post_author.id,
@@ -1223,7 +1282,9 @@ def create_inquiry(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    validated_dept = validate_department_name(payload.dept)
     data = payload.model_dump()
+    data["dept"] = validated_dept
     anonymous = payload.anonymous
     data = {
         **data,
@@ -1379,8 +1440,8 @@ def get_notices(
                 or 0
             )
             start += 1
-        if start < 0:
-            raise HTTPException(400, "cursor 값이 올바르지 않습니다.")
+    if start < 0:
+        raise HTTPException(400, "cursor 값이 올바르지 않습니다.")
     records = list(
         db.scalars(
             base_stmt.order_by(
@@ -1550,16 +1611,3 @@ def confirm_notice(
     return envelope(
         {"id": notice_id, "confirmedByMe": True, "confirmed": total}, "확인했습니다."
     )
-
-
-def notify_user(
-    db: Session,
-    user_id: int | None,
-    kind: str,
-    title: str,
-    href: str,
-    action: bool = False,
-):
-    from app.api.shared import notify_user as send_notification
-
-    send_notification(db, user_id, kind, title, href, action)

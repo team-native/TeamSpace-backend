@@ -30,12 +30,50 @@ from app.services.organization import (
     is_admin_account,
     load_organization,
     normalize_department_name,
+    validate_department_name,
 )
 from app.services.security import hash_password
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 CARD_ORGANIZATIONS = {"NativeLab", "NativeOps", "FA", "IT"}
+
+DEFAULT_NOTIFICATION_KINDS: dict[str, bool] = {
+    "내 업무": True,
+    "재정": True,
+    "일정": True,
+    "공지": True,
+    "규칙 (제도 변경)": True,
+    "게시판": False,
+}
+
+DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
+    "push": False,
+    "kinds": DEFAULT_NOTIFICATION_KINDS,
+    "dnd": True,
+    "dndFrom": "23:00",
+    "dndTo": "08:00",
+    "dndDays": ["월", "화", "수", "목", "금", "토", "일"],
+}
+
+
+def _notification_settings_response(payload: dict[str, Any] | None) -> dict[str, Any]:
+    raw = payload or {}
+    merged: dict[str, Any] = {
+        **DEFAULT_NOTIFICATION_SETTINGS,
+        **raw,
+    }
+    merged["push"] = bool(merged.get("push", False))
+    merged["dnd"] = bool(merged.get("dnd", True))
+    merged["kinds"] = {
+        **DEFAULT_NOTIFICATION_KINDS,
+        **(raw.get("kinds") or {}),
+    }
+    if merged.get("dndDays") is None:
+        merged["dndDays"] = list(DEFAULT_NOTIFICATION_SETTINGS["dndDays"])
+    else:
+        merged["dndDays"] = list(merged["dndDays"])
+    return merged
 
 
 class ProfilePatch(BaseModel):
@@ -100,8 +138,10 @@ def patch_me(
         data["dept"] = data.pop("department")
     if "name" in data and data["name"] is not None:
         user.name = data.pop("name")
-    if "dept" in data and data["dept"] is not None:
-        normalized_dept = normalize_department_name(data["dept"])
+    if "dept" in data:
+        if data["dept"] is None or not str(data["dept"]).strip():
+            raise HTTPException(422, "부서를 입력해주세요.")
+        normalized_dept = validate_department_name(data["dept"])
         data["dept"] = normalized_dept
         user.department = normalized_dept
     if (
@@ -135,12 +175,13 @@ def get_people(
     _: User = Depends(get_current_user),
 ):
     people = _people_items(db)
-    if dept:
-        normalized_dept = normalize_department_name(dept)
+    if dept and dept not in {"전체", "all"}:
+        normalized_dept = validate_department_name(dept)
         people = [
             person
             for person in people
             if normalize_department_name(person.get("dept")) == normalized_dept
+            or normalize_department_name(person.get("department")) == normalized_dept
         ]
     if q:
         query = q.strip().casefold()
@@ -362,9 +403,10 @@ def signup_request(payload: SignupRequest, db: Session = Depends(get_db)):
     )
     if pending:
         raise HTTPException(409, "이미 검토 중인 가입 요청이 있습니다.")
+    validated_dept = validate_department_name(payload.dept)
     data = payload.model_dump(exclude={"password"})
     data["email"] = str(payload.email)
-    data["dept"] = normalize_department_name(payload.dept)
+    data["dept"] = validated_dept
     if payload.password:
         data["passwordHash"] = hash_password(payload.password)
     data.update(
@@ -554,30 +596,7 @@ def get_notification_settings(
             Resource.owner_id == user.id,
         )
     )
-    default_kinds = {
-        "내 업무": True,
-        "재정": True,
-        "일정": True,
-        "공지": True,
-        "규칙 (제도 변경)": True,
-        "게시판": False,
-    }
-    defaults: dict[str, Any] = {
-        "push": False,
-        "kinds": default_kinds,
-        "dnd": True,
-        "dndFrom": "23:00",
-        "dndTo": "08:00",
-        "dndDays": ["월", "화", "수", "목", "금", "토", "일"],
-    }
-    if not record or not record.payload:
-        return envelope(defaults)
-    merged = {**defaults, **record.payload}
-    merged["push"] = bool(merged.get("push", False))
-    merged["kinds"] = {**default_kinds, **(record.payload.get("kinds") or {})}
-    if merged.get("dndDays") is None:
-        merged["dndDays"] = defaults["dndDays"]
-    return envelope(merged)
+    return envelope(_notification_settings_response(record.payload if record else None))
 
 
 @router.patch("/me/notification-settings", summary="알림 설정 수정")
@@ -595,27 +614,23 @@ def patch_notification_settings(
     current = record.payload if record else {}
     values = payload.model_dump(exclude_unset=True)
     if "kinds" in values and values["kinds"] is not None:
-        allowed_kinds = {
-            "내 업무",
-            "재정",
-            "일정",
-            "공지",
-            "규칙 (제도 변경)",
-            "게시판",
-        }
-        if not set(values["kinds"]).issubset(allowed_kinds):
+        if not set(values["kinds"]).issubset(set(DEFAULT_NOTIFICATION_KINDS)):
             raise HTTPException(422, "지원하지 않는 알림 분류가 포함되어 있습니다.")
-        values["kinds"] = {**current.get("kinds", {}), **values["kinds"]}
+        values["kinds"] = {
+            **DEFAULT_NOTIFICATION_KINDS,
+            **(current.get("kinds") or {}),
+            **values["kinds"],
+        }
     if "dndDays" in values and values["dndDays"] is not None:
         allowed_days = {"월", "화", "수", "목", "금", "토", "일"}
         if not set(values["dndDays"]).issubset(allowed_days):
             raise HTTPException(422, "방해 금지 요일이 올바르지 않습니다.")
-    data = {**current, **values}
+    merged = _notification_settings_response({**current, **values})
     if record:
-        update_record(db, record, data)
+        update_record(db, record, merged)
     else:
-        create_record(db, "notification_settings", data, user)
-    return envelope(data, "알림 설정을 저장했습니다.")
+        create_record(db, "notification_settings", merged, user)
+    return envelope(merged, "알림 설정을 저장했습니다.")
 
 
 @router.post("/push/subscriptions", status_code=201, summary="브라우저 푸시 구독 등록")
