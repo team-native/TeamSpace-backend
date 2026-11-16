@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime, time, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.resource import Resource
 from app.models.user import User
+from app.services.organization import get_public_user_id
 
 APPROVAL_FORM_TYPES = (
     "비용 승인",
@@ -32,6 +34,16 @@ def iso(value: datetime | None) -> str | None:
     if value is None:
         return None
     return value.isoformat()
+
+
+def public_photo_url(raw_photo: str | None, person_id: str) -> str:
+    value = str(raw_photo or "").strip()
+    if not value:
+        return ""
+    if value.startswith("data:image/"):
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        return f"/people/{person_id}/photo?v={digest}"
+    return value
 
 
 def create_record(
@@ -106,6 +118,7 @@ def user_profile(
     user: User,
     profile_data: dict[str, Any] | None = None,
     projects_by_user: dict[str, list[list[str]]] | None = None,
+    public_id: str | None = None,
 ) -> dict[str, Any]:
     joined_at = user.created_at
     if joined_at and joined_at.tzinfo is None:
@@ -119,6 +132,7 @@ def user_profile(
         data = profile.payload if profile else {}
     else:
         data = profile_data
+    resolved_public_id = public_id or get_public_user_id(db, user)
     projects = data.get("projects")
     if projects is None:
         if projects_by_user is not None:
@@ -147,8 +161,8 @@ def user_profile(
         "major": data.get("major", ""),
         "cohort": data.get("cohort", ""),
         "github": data.get("github", ""),
-        "photo": data.get("photo", ""),
-        "avatarBackground": data.get("avatarBackground", ""),
+        "photo": public_photo_url(data.get("photo"), resolved_public_id),
+        "avatarBackground": data.get("avatarBackground") or "",
         "joined": iso(joined_at),
         "bio": data.get("bio", ""),
         "interests": data.get("interests", []),
