@@ -28,6 +28,7 @@ from app.api.shared import (
     iso,
     list_records,
     notify_user,
+    public_photo_url,
     update_record,
     user_can_finance,
 )
@@ -50,6 +51,7 @@ from app.services.organization import (
     find_explicit_users_for_member,
     get_public_user_id,
     get_user_by_public_id,
+    get_user_proposal_scopes,
     is_admin_account,
     normalize_department_name,
     validate_department_name,
@@ -91,6 +93,10 @@ class AdminUserCreate(BaseModel):
     email: EmailStr
     dept: str | None = Field(default=None, max_length=100)
     roles: list[str] = Field(min_length=1, max_length=1)
+
+
+class AdminPostPinPatch(BaseModel):
+    pinned: bool
 
 
 def _is_admin(user: User) -> bool:
@@ -266,7 +272,8 @@ def require_proposal_access(db: Session, user: User, proposal: Resource) -> None
     if _is_admin(user):
         return
     target_dept = normalize_department_name(proposal.payload.get("dept"))
-    if not target_dept or target_dept not in _user_departments(db, user):
+    allowed_targets = _user_departments(db, user) | get_user_proposal_scopes(db, user)
+    if not target_dept or target_dept not in allowed_targets:
         raise HTTPException(403, "제안을 처리할 담당 부서 권한이 없습니다.")
 
 
@@ -319,6 +326,31 @@ def _announce(
             notification_type,
             effective_at,
         )
+
+
+@router.patch("/admin/posts/{post_id}", summary="게시글 상단 고정 및 해제")
+def patch_admin_post_pin(
+    post_id: str,
+    payload: AdminPostPinPatch,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    require_admin(user)
+    post = get_record(db, "post", post_id)
+    if post.payload.get("status", "published") in {"hidden", "deleted"}:
+        raise HTTPException(409, "숨김 또는 삭제 처리된 게시글은 고정할 수 없습니다.")
+    post.payload = {**post.payload, "pinned": payload.pinned}
+    db.commit()
+    db.refresh(post)
+    message = (
+        "게시글을 상단에 고정했습니다."
+        if payload.pinned
+        else "게시글 상단 고정을 해제했습니다."
+    )
+    return envelope(
+        {"id": str(post.id), "pinned": bool(post.payload.get("pinned", False))},
+        message,
+    )
 
 
 @router.post("/admin/projects", status_code=201, summary="프로젝트 등록")
@@ -1078,13 +1110,13 @@ def admin_proposals(
     user: User = Depends(get_current_user),
 ):
     is_admin = _is_admin(user)
-    user_depts = _user_departments(db, user)
-    if not is_admin and not user_depts:
+    user_targets = _user_departments(db, user) | get_user_proposal_scopes(db, user)
+    if not is_admin and not user_targets:
         raise HTTPException(403, "관리자 또는 담당 부서 권한이 필요합니다.")
     stmt = select(Resource).where(Resource.resource_type == "proposal")
     if not is_admin:
         allowed_dept_values = set().union(
-            *(_department_query_values(dept) for dept in user_depts)
+            *(_department_query_values(dept) for dept in user_targets)
         )
         stmt = stmt.where(Resource.payload["dept"].as_string().in_(allowed_dept_values))
     if status and status not in {"전체", "all"}:
@@ -1097,12 +1129,40 @@ def admin_proposals(
             raise HTTPException(400, "cursor 값이 올바르지 않습니다.") from None
     records = list(db.scalars(stmt.order_by(Resource.id.desc()).limit(limit + 1)))
     page = records[:limit]
+    owner_ids = {
+        record.owner_id
+        for record in page
+        if record.owner_id and not (record.payload or {}).get("anonymous")
+    }
+    member_id_map = build_user_member_id_map(db) if owner_ids else {}
+    profiles = (
+        {
+            profile.owner_id: (profile.payload or {})
+            for profile in db.scalars(
+                select(Resource).where(
+                    Resource.resource_type == "profile",
+                    Resource.owner_id.in_(owner_ids),
+                )
+            )
+        }
+        if owner_ids
+        else {}
+    )
+    items = []
+    for record in page:
+        data = public_content_payload(record.payload)
+        if data.get("anonymous") or not record.owner_id:
+            data["authorId"] = ""
+            data["authorPhoto"] = ""
+        else:
+            public_id = member_id_map.get(record.owner_id, str(record.owner_id))
+            raw_photo = profiles.get(record.owner_id, {}).get("photo")
+            data["authorId"] = public_id
+            data["authorPhoto"] = public_photo_url(raw_photo, public_id)
+        items.append({"id": str(record.id), **data})
     return envelope(
         {
-            "items": [
-                {"id": str(record.id), **public_content_payload(record.payload)}
-                for record in page
-            ],
+            "items": items,
             "nextCursor": str(page[-1].id) if len(records) > limit and page else None,
         }
     )
