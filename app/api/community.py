@@ -14,6 +14,7 @@ from app.api.shared import (
     get_record,
     iso,
     notify_user,
+    public_photo_url,
 )
 from app.core.config import settings
 from app.db.session import get_db
@@ -30,11 +31,54 @@ from app.services.anonymity import (
 )
 from app.services.content_views import count_content_view
 from app.services.notice_schedule import is_notice_visible
-from app.services.organization import is_admin_account, validate_department_name
+from app.services.organization import (
+    build_user_member_id_map,
+    is_admin_account,
+    validate_department_name,
+    validate_proposal_department_name,
+)
 
 router = APIRouter()
 REPORT_REASONS = {"욕설·비하", "개인정보 노출", "도배·광고", "사실과 다른 내용", "기타"}
 PROPOSAL_STATUSES = ("접수", "검토 중", "협업 중", "답변 완료", "반려")
+
+
+def _author_identity_map(
+    db: Session, user_ids: set[int]
+) -> dict[int, dict[str, str]]:
+    if not user_ids:
+        return {}
+    users = list(db.scalars(select(User).where(User.id.in_(user_ids))))
+    if not users:
+        return {}
+    profiles = {
+        profile.owner_id: (profile.payload or {})
+        for profile in db.scalars(
+            select(Resource).where(
+                Resource.resource_type == "profile",
+                Resource.owner_id.in_(user_ids),
+            )
+        )
+    }
+    member_id_map = build_user_member_id_map(db)
+    result: dict[int, dict[str, str]] = {}
+    for author in users:
+        public_id = member_id_map.get(author.id, str(author.id))
+        raw_photo = profiles.get(author.id, {}).get("photo")
+        result[author.id] = {
+            "name": author.name,
+            "authorId": public_id,
+            "authorPhoto": public_photo_url(raw_photo, public_id),
+        }
+    return result
+
+
+def _single_author_identity(db: Session, user_id: int | None) -> dict[str, str]:
+    if not user_id:
+        return {"name": "알 수 없음", "authorId": "", "authorPhoto": ""}
+    return _author_identity_map(db, {user_id}).get(
+        user_id, {"name": "알 수 없음", "authorId": "", "authorPhoto": ""}
+    )
 
 
 def _post_view(
@@ -45,14 +89,10 @@ def _post_view(
     comment_count: int | None = None,
     author_name: str | None = None,
     author_preloaded: bool = False,
+    author_info: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     data = record.payload
     anonymous = bool(data.get("anonymous") or data.get("isAnonymous"))
-    author = (
-        db.get(User, record.owner_id)
-        if record.owner_id and not anonymous and not author_preloaded
-        else None
-    )
     comments = (
         list(
             db.scalars(
@@ -74,7 +114,7 @@ def _post_view(
         "category": data.get("category", "자유"),
         "title": data.get("title", ""),
         "body": data.get("body", ""),
-        "anonymous": bool(data.get("anonymous") or data.get("isAnonymous")),
+        "anonymous": anonymous,
         "anonComments": bool(data.get("anonComments")),
         "views": int(data.get("views", 0)),
         "likes": int(data.get("likes", 0)),
@@ -85,8 +125,27 @@ def _post_view(
         "commentCount": comment_count,
         "attachments": data.get("attachments", []),
     }
-    if not result["anonymous"]:
-        result["author"] = author_name or (author.name if author else "알 수 없음")
+    if anonymous:
+        result["authorId"] = ""
+        result["authorPhoto"] = ""
+    else:
+        resolved_author = (
+            author_info
+            if author_info is not None
+            else (
+                {
+                    "name": author_name or "알 수 없음",
+                    "authorId": "",
+                    "authorPhoto": "",
+                }
+                if author_preloaded
+                else _single_author_identity(db, record.owner_id)
+            )
+        )
+        result["author"] = resolved_author["name"]
+        result["authorId"] = resolved_author["authorId"]
+        result["authorPhoto"] = resolved_author["authorPhoto"]
+
     if detail:
         post_reaction = db.scalar(
             select(Resource.id).where(
@@ -110,16 +169,7 @@ def _post_view(
             for comment in comments
             if comment.owner_id and not comment.payload.get("anonymous")
         }
-        comment_author_names = (
-            {
-                comment_author.id: comment_author.name
-                for comment_author in db.scalars(
-                    select(User).where(User.id.in_(comment_owner_ids))
-                )
-            }
-            if comment_owner_ids
-            else {}
-        )
+        comment_author_map = _author_identity_map(db, comment_owner_ids)
         anonymous_author_numbers: dict[str, int] = {}
         for comment in comments:
             comment_data = comment.payload
@@ -159,8 +209,8 @@ def _post_view(
                 db,
                 viewer,
                 bool(data.get("anonymous")),
-                author_name=comment_author_names.get(comment.owner_id),
                 author_preloaded=True,
+                author_info=comment_author_map.get(comment.owner_id),
                 liked=str(comment.id) in liked_comment_ids,
                 anonymous_author_label=anonymous_labels_by_comment_id[
                     str(comment.id)
@@ -179,20 +229,17 @@ def _comment_view(
     post_anonymous: bool = False,
     author_name: str | None = None,
     author_preloaded: bool = False,
+    author_info: dict[str, str] | None = None,
     liked: bool = False,
     anonymous_author_label: str | None = None,
     anonymous_number: int | None = None,
 ) -> dict[str, Any]:
     data = record.payload
-    author = (
-        db.get(User, record.owner_id)
-        if record.owner_id and not data.get("anonymous") and not author_preloaded
-        else None
-    )
+    is_anonymous = bool(data.get("anonymous"))
     result = {
         "id": str(record.id),
         "postId": str(data.get("postId", "")),
-        "anonymous": bool(data.get("anonymous")),
+        "anonymous": is_anonymous,
         "text": data.get("text", ""),
         "createdAt": iso(record.created_at),
         "updatedAt": data.get("updatedAt"),
@@ -203,12 +250,31 @@ def _comment_view(
     }
     if anonymous_author_label == "글쓴이":
         result["author"] = "글쓴이"
-    elif data.get("anonymous"):
+        result["authorId"] = ""
+        result["authorPhoto"] = ""
+    elif is_anonymous:
         result["author"] = anonymous_author_label or "익명"
+        result["authorId"] = ""
+        result["authorPhoto"] = ""
         if anonymous_number is not None:
             result["anonymousNumber"] = anonymous_number
-    elif not data.get("anonymous"):
-        result["author"] = author_name or (author.name if author else "알 수 없음")
+    else:
+        resolved_author = (
+            author_info
+            if author_info is not None
+            else (
+                {
+                    "name": author_name or "알 수 없음",
+                    "authorId": "",
+                    "authorPhoto": "",
+                }
+                if author_preloaded
+                else _single_author_identity(db, record.owner_id)
+            )
+        )
+        result["author"] = resolved_author["name"]
+        result["authorId"] = resolved_author["authorId"]
+        result["authorPhoto"] = resolved_author["authorPhoto"]
     result["mine"] = is_record_owner(record, viewer)
     return result
 
@@ -382,24 +448,18 @@ def get_posts(
     owner_ids = {
         record.owner_id
         for record in page_records
-        if record.owner_id and not record.payload.get("anonymous")
+        if record.owner_id
+        and not (record.payload.get("anonymous") or record.payload.get("isAnonymous"))
     }
-    author_names = (
-        {
-            author.id: author.name
-            for author in db.scalars(select(User).where(User.id.in_(owner_ids)))
-        }
-        if owner_ids
-        else {}
-    )
+    author_map = _author_identity_map(db, owner_ids)
     items = [
         _post_view(
             record,
             db,
             user,
             comment_count=counts[str(record.id)],
-            author_name=author_names.get(record.owner_id),
             author_preloaded=True,
+            author_info=author_map.get(record.owner_id),
         )
         for record in page_records
     ]
@@ -498,6 +558,7 @@ def _proposal_view(
     comment_count: int | None = None,
     author_name: str | None = None,
     author_preloaded: bool = False,
+    author_info: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     data = proposal.payload
     anonymous = bool(data.get("anonymous"))
@@ -547,11 +608,28 @@ def _proposal_view(
         "history": data.get("history", []),
         "views": int(data.get("views", 0) or 0),
     }
-    if not anonymous:
-        result["author"] = author_name or (
-            author.name if author else data.get("author", "알 수 없음")
+    if anonymous:
+        result["authorId"] = ""
+        result["authorPhoto"] = ""
+    else:
+        resolved_author = (
+            author_info
+            if author_info is not None
+            else (
+                {
+                    "name": author_name or data.get("author", "알 수 없음"),
+                    "authorId": "",
+                    "authorPhoto": "",
+                }
+                if author_preloaded
+                else _single_author_identity(db, proposal.owner_id)
+            )
         )
+        result["author"] = resolved_author["name"]
+        result["authorId"] = resolved_author["authorId"]
+        result["authorPhoto"] = resolved_author["authorPhoto"]
         result["dept"] = data.get("dept") or (author.department if author else "")
+
     if detail:
         reaction = db.scalar(
             select(Resource.id).where(
@@ -566,16 +644,7 @@ def _proposal_view(
             for comment in comments
             if comment.owner_id and not comment.payload.get("anonymous")
         }
-        comment_author_names = (
-            {
-                comment_author.id: comment_author.name
-                for comment_author in db.scalars(
-                    select(User).where(User.id.in_(comment_owner_ids))
-                )
-            }
-            if comment_owner_ids
-            else {}
-        )
+        comment_author_map = _author_identity_map(db, comment_owner_ids)
         anonymous_numbers: dict[str, int] = {}
         for comment in comments:
             comment_data = comment.payload
@@ -592,20 +661,23 @@ def _proposal_view(
         comment_items = []
         for comment in comments:
             comment_data = comment.payload
+            is_comment_anon = bool(comment_data.get("anonymous"))
             item = {
                 "id": str(comment.id),
                 "text": comment_data.get("text", ""),
                 "createdAt": iso(comment.created_at),
-                "anonymous": bool(comment_data.get("anonymous")),
+                "anonymous": is_comment_anon,
                 "mine": is_record_owner(comment, user),
             }
             if (
                 anonymous
-                and comment_data.get("anonymous")
+                and is_comment_anon
                 and comment_data.get("isProposalAuthor")
             ):
                 item["author"] = "글쓴이"
-            elif comment_data.get("anonymous"):
+                item["authorId"] = ""
+                item["authorPhoto"] = ""
+            elif is_comment_anon:
                 owner_key = str(
                     comment_data.get(
                         "anonymousOwnerKey", f"proposal-comment:{comment.id}"
@@ -613,13 +685,20 @@ def _proposal_view(
                 )
                 number = anonymous_numbers.get(owner_key)
                 item["author"] = f"익명 {number}" if number is not None else "익명"
+                item["authorId"] = ""
+                item["authorPhoto"] = ""
                 if number is not None:
                     item["anonymousNumber"] = number
-            elif not comment_data.get("anonymous"):
-                item["author"] = comment_author_names.get(
-                    comment.owner_id, "알 수 없음"
+            else:
+                resolved_comment_author = comment_author_map.get(
+                    comment.owner_id,
+                    {"name": "알 수 없음", "authorId": "", "authorPhoto": ""},
                 )
+                item["author"] = resolved_comment_author["name"]
+                item["authorId"] = resolved_comment_author["authorId"]
+                item["authorPhoto"] = resolved_comment_author["authorPhoto"]
             comment_items.append(item)
+
         legacy_comments = data.get("comments", [])
         legacy_numbers: dict[str, int] = {}
         for index, comment in enumerate(legacy_comments, start=1):
@@ -645,6 +724,11 @@ def _proposal_view(
                     )
                     if number is not None:
                         legacy_comment["anonymousNumber"] = number
+                legacy_comment["authorId"] = ""
+                legacy_comment["authorPhoto"] = ""
+            else:
+                legacy_comment.setdefault("authorId", "")
+                legacy_comment.setdefault("authorPhoto", "")
             comment_items.append(legacy_comment)
         result["comments"] = comment_items
     return result
@@ -749,14 +833,7 @@ def get_proposals(
         for proposal, _, _ in page_rows
         if proposal.owner_id and not proposal.payload.get("anonymous")
     }
-    author_names = (
-        {
-            author.id: author.name
-            for author in db.scalars(select(User).where(User.id.in_(owner_ids)))
-        }
-        if owner_ids
-        else {}
-    )
+    author_map = _author_identity_map(db, owner_ids)
     page = [
         _proposal_view(
             proposal,
@@ -765,8 +842,8 @@ def get_proposals(
             reaction_count=int(likes_count or 0),
             comment_count=int(resource_comments or 0)
             + len(proposal.payload.get("comments", [])),
-            author_name=author_names.get(proposal.owner_id),
             author_preloaded=True,
+            author_info=author_map.get(proposal.owner_id),
         )
         for proposal, likes_count, resource_comments in page_rows
     ]
@@ -799,7 +876,7 @@ def create_proposal(
     if not body:
         raise HTTPException(422, "제안 내용을 입력해주세요.")
     normalized_dept = (
-        validate_department_name(payload.dept)
+        validate_proposal_department_name(payload.dept)
         if payload.dept and payload.dept.strip()
         else None
     )
@@ -865,7 +942,7 @@ def patch_user_proposal(
     if "dept" in changes:
         dept_val = changes["dept"]
         data["dept"] = (
-            validate_department_name(dept_val)
+            validate_proposal_department_name(dept_val)
             if dept_val and dept_val.strip()
             else None
         )

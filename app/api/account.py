@@ -1,10 +1,15 @@
+import base64
+import binascii
 import hashlib
 import logging
+import mimetypes
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
@@ -16,6 +21,7 @@ from app.api.shared import (
     iso,
     notification_response,
     notify_user,
+    public_photo_url,
     update_record,
     user_profile,
 )
@@ -26,6 +32,7 @@ from app.models.user import User
 from app.services.email import EmailConfigurationError, EmailDeliveryError, send_email
 from app.services.organization import (
     build_user_member_id_map,
+    get_public_user_id,
     get_user_by_public_id,
     is_admin_account,
     load_organization,
@@ -37,6 +44,19 @@ from app.services.security import hash_password
 router = APIRouter()
 logger = logging.getLogger(__name__)
 CARD_ORGANIZATIONS = {"NativeLab", "NativeOps", "FA", "IT"}
+AVATAR_DIR = Path(__file__).resolve().parents[2] / "uploads" / "avatars"
+MAX_AVATAR_BYTES = 5 * 1024 * 1024
+DATA_URI_IMAGE_PATTERN = re.compile(
+    r"^data:(image/(?:jpeg|jpg|png|webp|gif));base64,(.+)$",
+    re.DOTALL,
+)
+AVATAR_EXTENSIONS: dict[str, str] = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 
 DEFAULT_NOTIFICATION_KINDS: dict[str, bool] = {
     "내 업무": True,
@@ -55,6 +75,52 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
     "dndTo": "08:00",
     "dndDays": ["월", "화", "수", "목", "금", "토", "일"],
 }
+
+
+def _decode_data_uri_image(value: str) -> tuple[bytes, str]:
+    match = DATA_URI_IMAGE_PATTERN.match(value.strip())
+    if not match:
+        raise HTTPException(422, "지원하지 않는 프로필 이미지 형식입니다.")
+    raw_mime = match.group(1).lower()
+    mime_type = "image/jpeg" if raw_mime == "image/jpg" else raw_mime
+    try:
+        raw_bytes = base64.b64decode(match.group(2), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(422, "프로필 이미지 데이터가 올바르지 않습니다.") from exc
+    if not raw_bytes:
+        raise HTTPException(422, "프로필 이미지 데이터가 비어 있습니다.")
+    if len(raw_bytes) > MAX_AVATAR_BYTES:
+        raise HTTPException(413, "프로필 이미지는 5MB 이하만 등록할 수 있습니다.")
+    return raw_bytes, mime_type
+
+
+def _delete_avatar_file(avatar_path: str | None) -> None:
+    if not avatar_path:
+        return
+    try:
+        resolved_dir = AVATAR_DIR.resolve()
+        candidate = Path(avatar_path).resolve()
+        if candidate.parent == resolved_dir and candidate.is_file():
+            candidate.unlink()
+    except OSError:
+        logger.warning("Could not delete avatar file: %s", avatar_path)
+
+
+def _store_avatar_image(
+    user_id: int,
+    public_id: str,
+    data_uri: str,
+    old_avatar_path: str | None = None,
+) -> tuple[str, str]:
+    raw_bytes, mime_type = _decode_data_uri_image(data_uri)
+    ext = AVATAR_EXTENSIONS.get(mime_type, ".png")
+    digest = hashlib.sha256(raw_bytes).hexdigest()[:12]
+    AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+    target_path = AVATAR_DIR / f"{user_id}_{digest}{ext}"
+    target_path.write_bytes(raw_bytes)
+    if old_avatar_path and str(target_path) != str(old_avatar_path):
+        _delete_avatar_file(old_avatar_path)
+    return f"/people/{public_id}/photo?v={digest}", str(target_path)
 
 
 def _notification_settings_response(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -84,7 +150,9 @@ class ProfilePatch(BaseModel):
     cohort: str | None = None
     github: str | None = None
     photo: str | None = None
-    avatarBackground: Literal["GRAY", "BLUE", "YELLOW", "GREEN", "PINK"] | None = None
+    avatarBackground: Literal[
+        "GRAY", "BLUE", "YELLOW", "GREEN", "PINK", "WHITE"
+    ] | None = None
     bio: str | None = Field(default=None, max_length=60)
     interests: list[str] | None = None
 
@@ -150,16 +218,45 @@ def patch_me(
         and len(data["interests"]) > 5
     ):
         raise HTTPException(422, "관심사는 최대 5개까지 등록할 수 있습니다.")
+
     profile = db.scalar(
         select(Resource).where(
             Resource.resource_type == "profile", Resource.owner_id == user.id
         )
     )
-    current = profile.payload if profile else {}
+    current = dict(profile.payload or {}) if profile else {}
+    old_avatar_path = current.get("avatarFilePath")
+    remove_avatar_path = False
+
+    if "photo" in data:
+        raw_photo = data["photo"]
+        if raw_photo is None or not str(raw_photo).strip():
+            _delete_avatar_file(old_avatar_path)
+            data["photo"] = ""
+            remove_avatar_path = True
+        else:
+            photo_str = str(raw_photo).strip()
+            if photo_str.startswith("data:image/"):
+                public_id = get_public_user_id(db, user)
+                photo_url, file_path = _store_avatar_image(
+                    user.id, public_id, photo_str, old_avatar_path
+                )
+                data["photo"] = photo_url
+                data["avatarFilePath"] = file_path
+            else:
+                if old_avatar_path and not photo_str.startswith("/people/"):
+                    _delete_avatar_file(old_avatar_path)
+                    remove_avatar_path = True
+                data["photo"] = photo_str
+
+    merged = {**current, **data}
+    if remove_avatar_path:
+        merged.pop("avatarFilePath", None)
+
     if profile:
-        profile.payload = {**current, **data}
+        profile.payload = merged
     else:
-        db.add(Resource(resource_type="profile", owner_id=user.id, payload=data))
+        db.add(Resource(resource_type="profile", owner_id=user.id, payload=merged))
     db.commit()
     db.refresh(user)
     return envelope(user_profile(db, user), "프로필을 저장했습니다.")
@@ -285,7 +382,7 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
                     "displaySubtitle": _people_subtitle(card_department, major),
                     "cohort": "",
                     "github": "",
-                    "photo": "",
+                    "photo": public_photo_url(member.get("photo"), member["id"]),
                     "avatarBackground": "",
                     "joined": "",
                     "bio": "",
@@ -302,7 +399,13 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
             )
             continue
         linked_user_ids.add(person.id)
-        item = user_profile(db, person, profiles.get(person.id, {}), projects_by_user)
+        item = user_profile(
+            db,
+            person,
+            profiles.get(person.id, {}),
+            projects_by_user,
+            public_id=member["id"],
+        )
         item["id"] = member["id"]
         item["href"] = f"/inhouse/people/{member['id']}"
         item["linked"] = True
@@ -342,7 +445,11 @@ def _people_items(db: Session) -> list[dict[str, Any]]:
         if person.id not in linked_user_ids:
             public_id = member_id_map[person.id]
             item = user_profile(
-                db, person, profiles.get(person.id, {}), projects_by_user
+                db,
+                person,
+                profiles.get(person.id, {}),
+                projects_by_user,
+                public_id=public_id,
             )
             raw_department = normalize_department_name(
                 person.department or profiles.get(person.id, {}).get("dept", ""),
@@ -387,6 +494,46 @@ def get_person(
     if mapped:
         return envelope(mapped)
     return envelope(user_profile(db, person))
+
+
+@router.get("/people/{person_id}/photo", summary="팀원 프로필 사진 조회")
+def get_person_photo(person_id: str, db: Session = Depends(get_db)):
+    person = get_user_by_public_id(db, person_id)
+    if person is None or not person.active:
+        raise HTTPException(404, "프로필 사진을 찾을 수 없습니다.")
+    profile = db.scalar(
+        select(Resource).where(
+            Resource.resource_type == "profile", Resource.owner_id == person.id
+        )
+    )
+    payload = (profile.payload or {}) if profile else {}
+    cache_headers = {"Cache-Control": "public, max-age=86400"}
+
+    avatar_file_path = payload.get("avatarFilePath")
+    if avatar_file_path:
+        try:
+            resolved_dir = AVATAR_DIR.resolve()
+            file_path = Path(str(avatar_file_path)).resolve()
+            if file_path.parent == resolved_dir and file_path.is_file():
+                media_type = mimetypes.guess_type(file_path.name)[0] or "image/png"
+                return Response(
+                    content=file_path.read_bytes(),
+                    media_type=media_type,
+                    headers=cache_headers,
+                )
+        except OSError:
+            pass
+
+    raw_photo = str(payload.get("photo") or "").strip()
+    if raw_photo.startswith("data:image/"):
+        raw_bytes, mime_type = _decode_data_uri_image(raw_photo)
+        return Response(
+            content=raw_bytes,
+            media_type=mime_type,
+            headers=cache_headers,
+        )
+
+    raise HTTPException(404, "프로필 사진을 찾을 수 없습니다.")
 
 
 @router.post("/auth/signup-requests", status_code=202, summary="가입 요청")

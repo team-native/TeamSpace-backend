@@ -27,6 +27,12 @@ OFFICIAL_DEPARTMENTS: tuple[str, ...] = (
     "Design & Client",
 )
 
+PROPOSAL_TARGET_DEPARTMENTS: tuple[str, ...] = (
+    *OFFICIAL_DEPARTMENTS,
+    "PM / PO",
+    "전공 리더",
+)
+
 DEPARTMENT_ALIASES: dict[str, str] = {
     "nativeops": "NativeOps",
     "native ops": "NativeOps",
@@ -43,6 +49,13 @@ DEPARTMENT_ALIASES: dict[str, str] = {
     "design & client": "Design & Client",
     "design&client": "Design & Client",
     "design": "Design & Client",
+    "pm / po": "PM / PO",
+    "pm/po": "PM / PO",
+    "pm": "PM / PO",
+    "po": "PM / PO",
+    "전공 리더": "전공 리더",
+    "전공리더": "전공 리더",
+    "major leader": "전공 리더",
 }
 
 
@@ -96,6 +109,25 @@ def validate_department_name(
         raise HTTPException(
             422,
             f"공식 부서 목록에 없는 부서입니다. 허용 부서: {', '.join(OFFICIAL_DEPARTMENTS)}",
+        )
+    return normalized
+
+
+def validate_proposal_department_name(
+    department: str | None, *, allow_empty: bool = False
+) -> str:
+    normalized = normalize_department_name(department)
+    if not normalized:
+        if allow_empty:
+            return ""
+        raise HTTPException(
+            422,
+            f"담당 부서를 입력해주세요. 허용 대상: {', '.join(PROPOSAL_TARGET_DEPARTMENTS)}",
+        )
+    if normalized not in PROPOSAL_TARGET_DEPARTMENTS:
+        raise HTTPException(
+            422,
+            f"허용되지 않은 운영 제안 담당 부서입니다. 허용 대상: {', '.join(PROPOSAL_TARGET_DEPARTMENTS)}",
         )
     return normalized
 
@@ -254,3 +286,47 @@ def get_public_user_id(db: Session, user: User) -> str:
     if user.id in member_map:
         return member_map[user.id]
     return str(user.id)
+
+
+def get_user_proposal_scopes(db: Session, user: User) -> set[str]:
+    scopes: set[str] = set()
+    roles = {str(role).strip().casefold() for role in (user.roles or [])}
+    if roles.intersection({"pm", "po", "pm / po"}):
+        scopes.add("PM / PO")
+    if roles.intersection({"leader", "lead", "전공 리더"}):
+        scopes.add("전공 리더")
+
+    public_id = get_public_user_id(db, user)
+    org_data = load_organization()
+    member = next(
+        (
+            entry
+            for entry in org_data.get("members", [])
+            if str(entry.get("id")) == public_id
+        ),
+        None,
+    )
+    if member:
+        if member.get("pmPoRoles"):
+            scopes.add("PM / PO")
+        if member.get("majorLead"):
+            scopes.add("전공 리더")
+
+    groups = org_data.get("organizationChart", {}).get("groups", [])
+    for group in groups:
+        group_name = normalize_department_name(group.get("name"), groups)
+        if group_name not in {"PM / PO", "전공 리더"}:
+            continue
+        group_member_ids = {
+            str(entry.get("memberId"))
+            for entry in group.get("members", [])
+            if isinstance(entry, dict)
+        }
+        for leader_key in ("leader", "lead"):
+            leader_entry = group.get(leader_key)
+            if isinstance(leader_entry, dict) and leader_entry.get("memberId"):
+                group_member_ids.add(str(leader_entry["memberId"]))
+        if public_id in group_member_ids:
+            scopes.add(group_name)
+
+    return scopes
